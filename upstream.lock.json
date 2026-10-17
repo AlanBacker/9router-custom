@@ -8,8 +8,8 @@
     "digest": "sha256:5fc7020f3cf1ca6831bffe80314ecab9dde915d27ee3c479a4bb66f45dabbc27",
     "sourceSha": "87a74e1bda3677193c6f71a7e2100c90311f0689"
   },
-  "patchesSha": "b588307eb4550645ed31265a431ceb7fb4701315896f3c6ea1666d032023874b",
+  "patchesSha": "6539c2d24c8333c0a2e7aa907b963e170ea474764989998fd0cbc4094bd2bee5",
   "publishImage": "ghcr.io/alanbacker/9router-autopatch",
-  "verifiedAt": "2026-10-17T07:04:24.018Z",
-  "overlayRevision": "7d2820a88648257639c7457ff8cf40b8a817ab3b"
+  "verifiedAt": "2026-10-17T07:05:29.632Z",
+  "overlayRevision": "e54e9dca004a070aa71c300265ee5a91e3e6967e"
 }
