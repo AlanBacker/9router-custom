@@ -18,6 +18,7 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
     if(!enabled())return true;
     const c=(storage.read().connections||[]).find(c=>c.id===id);if(!c?.session)return false;
     const normalized=String(model||'').replace(/\([^()]*\)$/,'');if(normalized&&/^[a-zA-Z0-9._-]{1,128}$/.test(normalized)&&state(c.session).requested.size<8)state(c.session).requested.add(normalized);
+    if(state(c.session).testing||pool.getBinding(c.session)?.inFlight)return false;
     return isReady(c.session,normalized||null);
   }
   function snapshot(base){
@@ -87,7 +88,7 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
     void maintain();
     if(!ready(session,model))return Response.json({error:{type:'OpenCodePublicProxyUnavailable',message:'自动公共代理：这条线路尚未通过目标模型的真实推理验证，后台正在更换代理并复测'}},{status:503,headers:{'retry-after':'5'}});
     const response=await pool.fetch(input,{...init,[PROBE]:true});
-    if(!response.ok){s.passed.delete(model);s.reason=`业务请求 HTTP ${response.status}，等待重新验证`;s.nextAt=now()+1000;pool.publish(true);return pool.handledError(response,await response.clone().json().catch(()=>undefined));}
+    if(!response.ok){const detail=await response.clone().json().catch(()=>undefined);if(detail?.error?.type!=='OpenCodePublicProxyUnavailable'||!pool.bindingValid(session)){s.passed.delete(model);s.reason=`业务请求 HTTP ${response.status}，等待重新验证`;s.nextAt=now()+1000;pool.publish(true);}return pool.handledError(response,detail);}
     return response;
   }
   return {fetch,maintain,snapshot,canRoute,isReady};
