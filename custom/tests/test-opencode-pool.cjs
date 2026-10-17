@@ -52,9 +52,10 @@ function fakeApi(options = {}) {
   assert.equal(normal.connections.length,4);
   assert.deepEqual(normal.progress,[1,2,3]);
   for(const post of normal.posts){assert.equal(post.apiKey,'public');assert.equal(post.allowOverwrite,false);assert.equal(post.proxyPoolId,'pool-a')}
-  assert.equal(normal.patches[0].providerStrategies.opencode.stickyRoundRobinLimit,1);
-  assert.equal(normal.patches[0].providerStrategies.opencode.customSetting,7);
-  assert.equal(normal.patches[0].providerStrategies.other.fallbackStrategy,'fill-first');
+  assert.equal(normal.patches[0].opencodePublicProxy.enabled,true);
+  assert.equal(normal.patches[1].providerStrategies.opencode.stickyRoundRobinLimit,1);
+  assert.equal(normal.patches[1].providerStrategies.opencode.customSetting,7);
+  assert.equal(normal.patches[1].providerStrategies.other.fallbackStrategy,'fill-first');
   const race=fakeApi({conflict:true});
   const raced=await createConnections({count:2,prefix:'Free',fetchFn:race.fetchFn});
   assert.deepEqual(raced.created.map(c=>c.name),['Free 3','Free 4']);
@@ -63,7 +64,7 @@ function fakeApi(options = {}) {
   const warning=fakeApi({patchFailure:true});
   const warned=await createConnections({count:1,prefix:'Free',fetchFn:warning.fetchFn});
   assert.equal(warned.created.length,1);assert.match(warned.warning,/轮询失败/);
-  const noRotation=fakeApi();await createConnections({count:1,prefix:'Free',roundRobin:false,fetchFn:noRotation.fetchFn});assert.equal(noRotation.patches.length,0);
+  const noRotation=fakeApi();await createConnections({count:1,prefix:'Free',roundRobin:false,fetchFn:noRotation.fetchFn});assert.equal(noRotation.patches.length,1);assert.equal(noRotation.patches[0].opencodePublicProxy.enabled,true);
   for(const count of [0,-1,1.5,1001,NaN]) await assert.rejects(createConnections({count,prefix:'Free',fetchFn:()=>{throw new Error('Should not fetch')}}),/新增数量/);
   await assert.rejects(createConnections({count:1,prefix:'',fetchFn:()=>{throw new Error('Should not fetch')}}),/前缀/);
   await assert.rejects(createConnections({count:1,prefix:'Free',fetchFn:async()=>({ok:false,status:401,json:async()=>({error:'Unauthorized'})})}),e=>e.status===401&&e.created.length===0);

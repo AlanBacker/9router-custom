@@ -5,6 +5,7 @@ import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getAntigravityQuotaCache, getAntigravityModelQuota } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
+import { CUSTOM_PUBLIC_PROXY_HOOK } from "open-sse/config/opencodeCustom.js";
 
 // Mutex to prevent race conditions during account selection
 let selectionMutex = Promise.resolve();
@@ -85,6 +86,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
     const availableConnections = connections.filter(c => {
+      /*9R_OC_ADMISSION_V1*/if (c.providerSpecificData?.opencodePoolManaged === true && globalThis[Symbol.for(CUSTOM_PUBLIC_PROXY_HOOK)]?.canRoute?.(c.id, model) === false) return false;
       if (excludeSet.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
       const enabled = c.providerSpecificData?.enabledModels;
@@ -113,6 +115,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
+      /*9R_OC_ADMISSION_PENDING_V1*/if (connections.some(c => c.providerSpecificData?.opencodePoolManaged === true && globalThis[Symbol.for(CUSTOM_PUBLIC_PROXY_HOOK)]?.canRoute?.(c.id, model) === false)) return {allRateLimited: true, retryAfter: new Date(Date.now() + 5000).toISOString(), retryAfterHuman: "5s", lastError: "OpenCodePublicProxyUnavailable: 匿名线路正在进行真实推理验证，请稍后重试", lastErrorCode: 503};
       // Find earliest persistent lock or lazy Antigravity quota-cache reset for retry timing.
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
       const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);

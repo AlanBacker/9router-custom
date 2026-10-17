@@ -38,7 +38,7 @@ async function limitedText(response,maxBytes){
   try{for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;if(bytes>maxBytes)throw new Error('Response too large');out+=decoder.decode(value,{stream:true});}return out+decoder.decode();}
   finally{void reader.cancel().catch(()=>{});}
 }
-function createPool({nativeFetch,makeAgent,storage,config,logger=console,now=Date.now,renewSession=(old,reason)=>globalThis[Symbol.for('9router.opencodeAnonymous.v1')]?.renewInvalidSession(old,reason)}){
+function createTransportPool({nativeFetch,makeAgent,storage,config,logger=console,now=Date.now,renewSession=(old,reason)=>globalThis[Symbol.for('9router.opencodeAnonymous.v1')]?.renewInvalidSession(old,reason)}){
   let enabled=false,desired=0,round=null,lastRound=0,lastSources=0,nonce,baseline=null,hydrated=false,generation=0,lastPersist=0;
   let candidates=[],tested=0,sourceError=null,sourceStates=[],lastSourceAttempt=0;
   const entries=new Map(),assignments=new Map(),sessionIssues=new Map();
@@ -71,7 +71,7 @@ function createPool({nativeFetch,makeAgent,storage,config,logger=console,now=Dat
   function hydrate(){
     if(hydrated)return;hydrated=true;
     const saved=storage.load();if(saved?.version!==1)return;
-    for(const e of (saved.entries||[]).slice(0,100))if(normalizeProxy(e.url)&&publicIPv4(e.egress)){
+    for(const e of (saved.entries||[]).slice(0,config.maxCandidates||5000))if(normalizeProxy(e.url)&&publicIPv4(e.egress)){
       entries.set(e.url,{...e,agent:null,inFlight:0,failed:true});candidates.push(e.url);
     }
     // Restored nodes must pass live checks again. Keep their quota cooldowns.
@@ -171,7 +171,7 @@ function createPool({nativeFetch,makeAgent,storage,config,logger=console,now=Dat
     if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
     hydrate();void refresh();
     let session=headers.get('x-opencode-session');if(!session)return failure('缺少固定上游会话，自动公共代理未发送请求');
-    const recovery=s.config.autoRecover429===true;
+    const recovery=s.config.autoRecover429===true&&!init[Symbol.for('9router.opencodeAdmissionProbe.v1')];
     const paused=sessionIssues.get(session);if(recovery&&paused?.until>now())return failure('自动公共代理：当前匿名线路因鉴权或账号异常暂时隔离，冷却到期后自动复查；其他线路仍可使用',Math.max(1,Math.ceil((paused.until-now())/1000)));
     const valid=e=>e&&!e.failed&&e.until<=now()&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000;
     const alternative=exclude=>{
@@ -243,7 +243,20 @@ function createPool({nativeFetch,makeAgent,storage,config,logger=console,now=Dat
   }
   function shouldStop429Fallback(){try{const s=settings();return enabled&&s.config.autoRecover429===true;}catch{return false;}}
   function tick(){try{settings();if(enabled)void refresh();else publish();}catch(e){logger.warn?.('[OpenCodePublicProxy] Settings unavailable: '+e.message);}}
-  return {fetch:fetchWithPool,refresh,tick,snapshot,shouldStop429Fallback};
+  function getBinding(session){return entries.get(assignments.get(session));}
+  function bindingValid(session){const e=getBinding(session);return !!(e&&!e.failed&&e.until<=now()&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000);}
+  function rejectBinding(session,delay){const e=getBinding(session);if(e)e.until=Math.max(e.until||0,now()+delay);assignments.delete(session);publish(true);}
+  function canAcquire(session){if(bindingValid(session)&&!getBinding(session).inFlight)return true;const occupied=new Set(assignments.values());return usable().some(e=>!e.inFlight&&!occupied.has(e.url));}
+  return {fetch:fetchWithPool,refresh,tick,snapshot,shouldStop429Fallback,getBinding,bindingValid,rejectBinding,canAcquire,publish,handledError};
+}
+
+function createPool(options){
+  if(options.config.inferenceValidation!==true)return createTransportPool(options);
+  let admission;
+  const storage={...options.storage,status:value=>options.storage.status(admission?admission.snapshot(value):value)};
+  const pool=createTransportPool({...options,storage});
+  admission=require('./opencode-admission.cjs').createAdmission({...options,pool});
+  return {...pool,fetch:admission.fetch,snapshot:()=>admission.snapshot(pool.snapshot()),canRoute:admission.canRoute,maintain:admission.maintain,tick(){pool.tick();void admission.maintain().catch(e=>(options.logger||console).warn?.('[OpenCodeAdmission] '+e.message));}};
 }
 
 function runtimeStorage(config){
@@ -253,7 +266,7 @@ function runtimeStorage(config){
     read(){
       const d=database(),data=JSON.parse(d.prepare('SELECT data FROM settings WHERE id=1').get()?.data||'{}');
       let sessions={};try{sessions=JSON.parse(fs.readFileSync(path.join(process.env.DATA_DIR||'/app/data','opencode-anonymous-sessions.json'),'utf8')).sessions||{};}catch(e){if(e.code!=='ENOENT')throw e;}
-      const connections=d.prepare('SELECT id,name,data FROM providerConnections WHERE provider=? AND isActive=1').all('opencode').filter(r=>JSON.parse(r.data).providerSpecificData?.opencodePoolManaged===true).map(r=>({id:r.id,name:r.name,session:sessions[r.id]}));
+      const connections=d.prepare('SELECT id,name,data FROM providerConnections WHERE provider=? AND isActive=1').all('opencode').filter(r=>JSON.parse(r.data).providerSpecificData?.opencodePoolManaged===true).map(r=>({id:r.id,name:r.name,session:sessions[r.id]||(config.inferenceValidation&&data.opencodePublicProxy?.enabled?globalThis[Symbol.for('9router.opencodeAnonymous.v1')]?.getManagedSession({connectionId:r.id,providerSpecificData:{opencodePoolManaged:true}}):undefined)}));
       return {config:data.opencodePublicProxy||{},connections};
     },
     status(value){database().prepare("UPDATE settings SET data=json_set(data,'$.opencodePublicProxyRuntime',json(?)) WHERE id=1").run(JSON.stringify(value));},

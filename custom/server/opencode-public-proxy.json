@@ -19,5 +19,15 @@
   "maxCandidatesPerRound": 120,
   "maxCandidates": 5000,
   "replenishIntervalSeconds": 45,
-  "maxSourceBytes": 2097152
+  "maxSourceBytes": 2097152,
+  "inferenceValidation": true,
+  "probeModels": ["deepseek-v4.1-flash-free", "glm-5.3-flash-free"],
+  "inferenceMaxTokens": 64,
+  "inferenceTimeoutMs": 12000,
+  "inferenceConcurrency": 2,
+  "inferenceProbesPerMinute": 24,
+  "inferenceAttemptsPerLine": 3,
+  "inferenceRetrySeconds": 15,
+  "inferenceRejectCooldownSeconds": 1800,
+  "inferenceHealthMaxAgeSeconds": 1800
 }

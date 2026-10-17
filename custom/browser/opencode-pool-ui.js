@@ -56,6 +56,11 @@
         onProgress(created.length, count);
       }
       let warning = null;
+      try {
+        const latest = await api(fetchFn, '/api/settings');
+        await api(fetchFn, '/api/settings', {method: 'PATCH', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({opencodePublicProxy: {...latest.opencodePublicProxy, enabled: true}})});
+      } catch (error) { warning = `连接已创建但尚未验证：自动代理开启失败：${error.message}`; }
       if (roundRobin) {
         try {
           const latest = await api(fetchFn, '/api/settings');
@@ -63,7 +68,7 @@
             body: JSON.stringify({providerStrategies: {...latest.providerStrategies,
               opencode: {...latest.providerStrategies?.opencode, fallbackStrategy: 'round-robin', stickyRoundRobinLimit: 1}}})});
         } catch (error) {
-          warning = `连接已创建；自动开启轮询失败：${error.message}。可在下方手动开启。`;
+          warning = [warning, `自动开启轮询失败：${error.message}。可在下方手动开启。`].filter(Boolean).join('；');
         }
       }
       return {created, warning};
@@ -93,7 +98,7 @@
       panel.setAttribute('aria-label', 'OpenCode Free 匿名会话池');
       panel.style.cssText = 'border:1px solid #475569;border-radius:12px;padding:20px;margin-bottom:20px;background:rgba(100,116,139,.08);color:inherit';
       panel.innerHTML = `<h2 style="font-size:18px;font-weight:600;margin-bottom:8px">OpenCode Free 匿名会话池</h2>
-        <p style="font-size:13px;opacity:.8;margin-bottom:16px">填写新增数量。每条连接首次使用时分配独立、持久保存的上游会话，客户端会话不会覆盖它。重启和更新后继续使用原会话。</p>
+        <p style="font-size:13px;opacity:.8;margin-bottom:16px">创建后自动开启代理并进行目标模型的真实推理验证。未通过的线路保持待验证，自动更换候选代理复测；通过后才参与轮询。每条线路保留固定会话。</p>
         <form style="display:flex;gap:14px;align-items:end;flex-wrap:wrap">
           <label style="display:grid;gap:6px;font-size:13px">新增数量<input name="count" type="number" min="1" max="1000" step="1" value="1" required style="width:120px"></label>
           <label style="display:grid;gap:6px;font-size:13px">名称前缀<input name="prefix" type="text" maxlength="64" value="OpenCode Free" required style="width:220px;max-width:100%"></label>
@@ -130,7 +135,7 @@
           const result = await createConnections({count, prefix, roundRobin, fetchFn: win.fetch.bind(win),
             onProgress: (done, all) => { status.textContent = `正在创建：${done} / ${all}`; }});
           total = result.created.length;
-          message = result.warning || `已新增 ${total} 个连接${roundRobin ? '，已开启逐个轮询' : ''}。`;
+          message = result.warning || `已新增 ${total} 条待验证线路，后台已开始实测和自动更换代理；通过的线路才会参与${roundRobin ? '逐个轮询' : '请求'}。`;
         } catch (error) {
           total = error.created?.length || 0;
           message = `已确认创建 ${total} / ${count} 个连接。${error.message}${total ? ' 已创建的连接已保留。' : ''}`;

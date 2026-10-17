@@ -17,6 +17,8 @@
 - OpenCode Free批量创建连接的页面、每连接固定且持久的匿名会话。
 - DeepSeek指定low与OpenCode思考字段兼容。
 - 自动公共代理、源列表更新、出口去重、后台补充和过期复检。
+- 创建后自动开启代理并进入待验证队列。每条固定会话通过配置的目标模型真实推理（有实际输出并正常结束）后，才进入对应模型的业务轮询；失败自动冷却并换候选，空200和SSE错误不会通过。
+- 默认验证DeepSeek和GLM两个当前模型。每条每轮最多3次、后台并发2、每分钟最多24次、单次12秒/最多64输出tokens；本轮失败后继续后台补充复测，遵守上游冷却。重启后重新验证，保留会话和代理冷却。
 - 限流/代理/网关/连接故障最多换一次出口；明确会话失效只修复对应会话；鉴权/账号异常隔离线路并到期允许重试。
 
 源码入口分别在 `src/shared/components/OpenCodeCustomizations.jsx`、`open-sse/providers/registry/opencode.js`、`open-sse/executors/opencode.js`、`open-sse/translator/concerns/thinkingUnified.js`、`src/sse/handlers/chat.js`。运行时会话/代理服务位于 `custom/server`，页面代码在 `custom/browser`，直接随Next源码编译。源码常量集中在 `open-sse/config/opencodeCustom.js`。

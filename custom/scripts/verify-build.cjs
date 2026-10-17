@@ -5,7 +5,7 @@ const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(path.join(roo
 function files(dir){return fs.readdirSync(path.join(root,dir),{withFileTypes:true}).flatMap(e=>e.isDirectory()?files(path.posix.join(dir,e.name)):e.name.endsWith('.js')?[path.posix.join(dir,e.name)]:[]);}
 function write(){
  const server=files('.next/server'),client=files('.next/static'),proofs=[];
- for(const [token,group]of [['9router.opencodeAnonymous.v1',server],['[OpenCodeAutoRecovery]',server],['9router-opencode-pool',client],['auth-cooldown',client],['data-maintenance',client]]){
+ for(const [token,group]of [['9router.opencodeAnonymous.v1',server],['[OpenCodeAutoRecovery]',server],['9router.opencodePublicProxy.v1',server],['canRoute',server],['9router-opencode-pool',client],['全目标实测通过',client],['auth-cooldown',client],['data-maintenance',client]]){
   const file=group.find(f=>fs.readFileSync(path.join(root,f),'utf8').includes(token));assert(file,'Compiled feature missing: '+token);proofs.push({token,file,sha256:sha(file)});
  }
  const source=['custom-server.js','open-sse/config/opencodeCustom.js','open-sse/services/opencodeCustom.js','open-sse/executors/opencode.js','open-sse/providers/registry/opencode.js','open-sse/translator/concerns/thinkingUnified.js','src/sse/handlers/chat.js'];
