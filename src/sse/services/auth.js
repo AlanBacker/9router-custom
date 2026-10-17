@@ -115,7 +115,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
-      /*9R_OC_ADMISSION_PENDING_V1*/if (connections.some(c => c.providerSpecificData?.opencodePoolManaged === true && globalThis[Symbol.for(CUSTOM_PUBLIC_PROXY_HOOK)]?.canRoute?.(c.id, model) === false)) return {allRateLimited: true, retryAfter: new Date(Date.now() + 5000).toISOString(), retryAfterHuman: "5s", lastError: "OpenCodePublicProxyUnavailable: 匿名线路正在进行真实推理验证，请稍后重试", lastErrorCode: 503};
+      /*9R_OC_ADMISSION_PENDING_V1*/if (connections.some(c => c.providerSpecificData?.opencodePoolManaged === true && globalThis[Symbol.for(CUSTOM_PUBLIC_PROXY_HOOK)]?.canRoute?.(c.id, model) === false)) /*9R_OC_ADMISSION_STATUS_V2*/return(globalThis[Symbol.for("9router.opencodePublicProxy.v1")]?.getUnavailable?.(model)||{allRateLimited:true,retryAfter:new Date(Date.now()+60000).toISOString(),retryAfterHuman:"60s",lastError:"OpenCodePublicProxyUnavailable: 当前没有可用线路，恢复时间未知",lastErrorCode:503});
       // Find earliest persistent lock or lazy Antigravity quota-cache reset for retry timing.
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
       const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);

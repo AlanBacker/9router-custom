@@ -4,6 +4,7 @@ const root=path.resolve(__dirname,'../..');
 const {transform:thinking}=require('../source/deepseek.cjs');
 const {transformRegistry}=require('../source/registry.cjs');
 const {transform:anonymous}=require('../source/anonymous.cjs');
+const {upgradePending}=require('../source/admission.cjs');
 const check=process.argv.includes('--check');let changed=0;
 function update(name,fn){const file=path.join(root,name),before=fs.readFileSync(file,'utf8').replace(/\r\n/g,'\n'),after=fn(before);if(after!==before){if(check)throw Error('Source customization missing: '+name);fs.writeFileSync(file,after);changed++;}}
 function create(name,contents){const file=path.join(root,name);if(fs.existsSync(file))return;if(check)throw Error('Missing custom source '+name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,contents);changed++;}
@@ -37,6 +38,7 @@ update('src/sse/services/auth.js',code=>{
  return code.replace(needle,needle+'\n      /*9R_OC_ADMISSION_PENDING_V1*/if (connections.some(c => c.providerSpecificData?.opencodePoolManaged === true && globalThis[Symbol.for(CUSTOM_PUBLIC_PROXY_HOOK)]?.canRoute?.(c.id, model) === false)) return {allRateLimited: true, retryAfter: new Date(Date.now() + 5000).toISOString(), retryAfterHuman: "5s", lastError: "OpenCodePublicProxyUnavailable: 匿名线路正在进行真实推理验证，请稍后重试", lastErrorCode: 503};');
 });
 update('custom-server.js',code=>code.includes('custom/server/preload.cjs')?code:'require("./custom/scripts/verify-build.cjs").verifyIfBuilt();\nrequire("./custom/server/preload.cjs");\n'+code);
+update('src/sse/services/auth.js',upgradePending);
 update('package.json',code=>{const p=JSON.parse(code);p.scripts['custom:apply']='node custom/scripts/apply-source.cjs';p.scripts['test:custom']='node custom/scripts/test.cjs';if(!p.scripts.postbuild.includes('custom/scripts/verify-build.cjs'))p.scripts.postbuild+=' && node custom/scripts/verify-build.cjs --write';for(const key of ['dev','dev:webpack'])if(p.scripts[key]?.startsWith('next '))p.scripts[key]='node --require ./custom/server/preload.cjs ./node_modules/next/dist/bin/next '+p.scripts[key].slice(5);return JSON.stringify(p,null,2)+'\n';});
 update('Dockerfile',code=>{
  if(code.includes('# CUSTOM_SOURCE_BUILD'))return code;

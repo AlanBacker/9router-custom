@@ -256,7 +256,8 @@ function createPool(options){
   const storage={...options.storage,status:value=>options.storage.status(admission?admission.snapshot(value):value)};
   const pool=createTransportPool({...options,storage});
   admission=require('./opencode-admission.cjs').createAdmission({...options,pool});
-  return {...pool,fetch:admission.fetch,snapshot:()=>admission.snapshot(pool.snapshot()),canRoute:admission.canRoute,maintain:admission.maintain,tick(){pool.tick();void admission.maintain().catch(e=>(options.logger||console).warn?.('[OpenCodeAdmission] '+e.message));}};
+  function getUnavailable(model){const base=pool.snapshot();return require('./availability-status.cjs').describeUnavailable(admission.snapshot(base),model,{now:(options.now||Date.now)(),busyCount:base.lines.filter(l=>l.state==='busy').length});}
+  return {...pool,fetch:admission.fetch,snapshot:()=>admission.snapshot(pool.snapshot()),getUnavailable,canRoute:admission.canRoute,maintain:admission.maintain,tick(){pool.tick();void admission.maintain().catch(e=>(options.logger||console).warn?.('[OpenCodeAdmission] '+e.message));}};
 }
 
 function runtimeStorage(config){

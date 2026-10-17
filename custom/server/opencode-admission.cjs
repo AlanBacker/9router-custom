@@ -86,7 +86,10 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
     const s=state(session),model=String(body.model||'');
     if(s.requested.size<8&&/^[a-zA-Z0-9._-]{1,128}$/.test(model))s.requested.add(model);
     void maintain();
-    if(!ready(session,model))return Response.json({error:{type:'OpenCodePublicProxyUnavailable',message:'自动公共代理：这条线路尚未通过目标模型的真实推理验证，后台正在更换代理并复测'}},{status:503,headers:{'retry-after':'5'}});
+    if(!ready(session,model)){
+      const status=require('./availability-status.cjs').describeUnavailable(snapshot(pool.snapshot()),model,{now:now()});
+      return Response.json({error:{type:'OpenCodePublicProxyUnavailable',message:status.lastError.replace(/^OpenCodePublicProxyUnavailable: /,'')}},{status:503,headers:{'retry-after':status.retryAfterHuman.replace(/s$/,'')}});
+    }
     const response=await pool.fetch(input,{...init,[PROBE]:true});
     if(!response.ok){const detail=await response.clone().json().catch(()=>undefined);if(detail?.error?.type!=='OpenCodePublicProxyUnavailable'||!pool.bindingValid(session)){s.passed.delete(model);s.reason=`业务请求 HTTP ${response.status}，等待重新验证`;s.nextAt=now()+1000;pool.publish(true);}return pool.handledError(response,detail);}
     return response;
