@@ -8,5 +8,6 @@ assert.equal(guard('opencode',{status:429,error:'ordinary real-account error'}),
 assert(fs.readFileSync('src/app/layout.js','utf8').includes('<OpenCodeCustomizations />'));
 assert(fs.readFileSync('custom-server.js','utf8').includes('custom/server/preload.cjs'));
 assert(fs.readFileSync('Dockerfile','utf8').includes('RUN node custom/scripts/apply-source.cjs --check'));
+const scripts=JSON.parse(fs.readFileSync('package.json')).scripts;assert(scripts.dev.includes('custom/server/preload.cjs'));assert(scripts.postbuild.includes('custom/scripts/verify-build.cjs --write'));
 execFileSync(process.execPath,['custom/scripts/apply-source.cjs','--check'],{stdio:'inherit'});
 console.log('PASS: actual native source guards, browser integration, startup integration and idempotent source validation.');

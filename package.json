@@ -4,10 +4,10 @@
   "description": "9Router web dashboard",
   "private": true,
   "scripts": {
-    "dev": "next dev --port 20127",
-    "dev:webpack": "next dev --webpack --port 20127",
+    "dev": "node --require ./custom/server/preload.cjs ./node_modules/next/dist/bin/next dev --port 20127",
+    "dev:webpack": "node --require ./custom/server/preload.cjs ./node_modules/next/dist/bin/next dev --webpack --port 20127",
     "build": "next build --webpack",
-    "postbuild": "node scripts/copy-standalone-assets.mjs",
+    "postbuild": "node scripts/copy-standalone-assets.mjs && node custom/scripts/verify-build.cjs --write",
     "postbuild:bun": "node scripts/copy-standalone-assets.mjs",
     "start": "node custom-server.js --port 20127",
     "dev:bun": "bun --bun next dev --webpack --port 20127",

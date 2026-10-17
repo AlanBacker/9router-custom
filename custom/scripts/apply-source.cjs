@@ -26,7 +26,7 @@ update('src/sse/handlers/chat.js',code=>{
 });
 update('src/app/layout.js',code=>{if(code.includes('<OpenCodeCustomizations />'))return code;assert(code.includes('<GoogleAnalytics '),'Layout source changed');return 'import OpenCodeCustomizations from "@/shared/components/OpenCodeCustomizations";\n'+code.replace('<GoogleAnalytics ','<OpenCodeCustomizations />\n        <GoogleAnalytics ');});
 update('custom-server.js',code=>code.includes('custom/server/preload.cjs')?code:'require("./custom/scripts/verify-build.cjs").verifyIfBuilt();\nrequire("./custom/server/preload.cjs");\n'+code);
-update('package.json',code=>{const p=JSON.parse(code);p.scripts['custom:apply']='node custom/scripts/apply-source.cjs';p.scripts['test:custom']='node custom/scripts/test.cjs';return JSON.stringify(p,null,2)+'\n';});
+update('package.json',code=>{const p=JSON.parse(code);p.scripts['custom:apply']='node custom/scripts/apply-source.cjs';p.scripts['test:custom']='node custom/scripts/test.cjs';if(!p.scripts.postbuild.includes('custom/scripts/verify-build.cjs'))p.scripts.postbuild+=' && node custom/scripts/verify-build.cjs --write';for(const key of ['dev','dev:webpack'])if(p.scripts[key]?.startsWith('next '))p.scripts[key]='node --require ./custom/server/preload.cjs ./node_modules/next/dist/bin/next '+p.scripts[key].slice(5);return JSON.stringify(p,null,2)+'\n';});
 update('Dockerfile',code=>{
  if(code.includes('# CUSTOM_SOURCE_BUILD'))return code;
  assert.equal(code.split('RUN npm run build').length,2,'Docker build layout changed');
