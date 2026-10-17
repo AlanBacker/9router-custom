@@ -7,6 +7,7 @@ USER root
 WORKDIR /app
 COPY patches/ /opt/9router-hotfix/
 COPY scripts/verify-image.cjs scripts/entrypoint.sh /opt/9router-autopatch/
+COPY LICENSE /opt/9router-autopatch/LICENSE
 RUN npm ci --prefix /opt/9router-hotfix/runtime --ignore-scripts --omit=dev \
  && chmod 755 /opt/9router-hotfix /opt/9router-hotfix/runtime /opt/9router-hotfix/runtime/node_modules \
  && find /opt/9router-hotfix/runtime/node_modules -type d -exec chmod 755 {} + \
