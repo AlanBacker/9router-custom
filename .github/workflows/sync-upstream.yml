@@ -1,0 +1,91 @@
+name: Sync upstream, patch and publish
+on:
+  push:
+    branches: [main]
+    paths-ignore: [upstream.lock.json, 'docs/**', README.md]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when upstream has not changed
+        type: boolean
+        default: true
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: docker/setup-buildx-action@v3
+      - name: Resolve immutable upstream image and source commit
+        id: upstream
+        env:
+          FORCE_BUILD: ${{ github.event_name != 'schedule' || inputs.force == true }}
+        run: node scripts/resolve-upstream.cjs
+      - name: Checkout matching test source snapshot
+        if: steps.upstream.outputs.changed == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: decolua/9router
+          ref: ${{ steps.upstream.outputs.sourceSha }}
+          path: _upstream
+          persist-credentials: false
+      - name: Install locked proxy transport
+        if: steps.upstream.outputs.changed == 'true'
+        run: npm ci --prefix patches/runtime --ignore-scripts
+      - name: Run compatibility and recovery regressions
+        if: steps.upstream.outputs.changed == 'true'
+        run: npm test
+      - name: Build with strict source and compiled patch checks
+        if: steps.upstream.outputs.changed == 'true'
+        env:
+          BASE_IMAGE: ${{ steps.upstream.outputs.image }}
+        run: docker build --platform linux/amd64 --build-arg "UPSTREAM_IMAGE=$BASE_IMAGE" --build-arg "OVERLAY_REVISION=$GITHUB_SHA" -t 9router-autopatch:ci .
+      - name: Smoke test clean startup, auth and restart
+        if: steps.upstream.outputs.changed == 'true'
+        run: npm run smoke
+      - name: Publish only the tested image
+        if: steps.upstream.outputs.changed == 'true' && github.event_name != 'pull_request'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          IMAGE: ${{ steps.upstream.outputs.publishImage }}
+          BASE_IMAGE: ${{ steps.upstream.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          digest="${BASE_IMAGE##*@sha256:}"
+          tag="sha-${GITHUB_SHA:0:12}-base-${digest:0:12}"
+          docker tag 9router-autopatch:ci "$IMAGE:$tag"
+          docker push "$IMAGE:$tag"
+          docker tag 9router-autopatch:ci "$IMAGE:stable"
+          docker push "$IMAGE:stable"
+          printf '### Verified image\n`%s:stable`\n\nImmutable tag: `%s:%s`\n' "$IMAGE" "$IMAGE" "$tag" >> "$GITHUB_STEP_SUMMARY"
+      - name: Record verified upstream after publishing
+        if: steps.upstream.outputs.changed == 'true' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/publish-lock.cjs
+      - name: Report unchanged upstream
+        if: steps.upstream.outputs.changed != 'true'
+        run: echo 'Upstream and patch files are unchanged; keeping the verified image.' >> "$GITHUB_STEP_SUMMARY"

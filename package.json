@@ -1,0 +1,12 @@
+{
+  "name": "9router-autopatch",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node scripts/test.cjs",
+    "resolve": "node scripts/resolve-upstream.cjs",
+    "smoke": "node scripts/smoke.cjs"
+  }
+}

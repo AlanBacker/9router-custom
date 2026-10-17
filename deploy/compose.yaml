@@ -1,0 +1,18 @@
+services:
+  9router:
+    image: ghcr.io/alanbacker/9router-autopatch:stable
+    container_name: 9router
+    restart: unless-stopped
+    ports:
+      - '${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-20128}:20128'
+    environment:
+      INITIAL_PASSWORD: '${INITIAL_PASSWORD:?Set INITIAL_PASSWORD in .env}'
+      JWT_SECRET: '${JWT_SECRET:?Set a long random JWT_SECRET in .env}'
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
+    volumes:
+      - data:/app/data
+volumes:
+  data:
+    external: true
+    name: '${NINEROUTER_DATA_VOLUME:-9router-data}'

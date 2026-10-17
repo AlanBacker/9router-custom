@@ -1,0 +1,12 @@
+_upstream/
+**/node_modules/
+.cache/
+.env
+.env.*
+!.env.example
+candidate.json
+*.log
+*.tar.gz
+*.sqlite*
+*sessions.json
+*private*key*

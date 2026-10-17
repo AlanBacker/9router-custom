@@ -1,0 +1,11 @@
+.git
+.github
+_upstream
+tests
+docs
+deploy
+.cache
+**/node_modules
+.env*
+candidate.json
+*.log

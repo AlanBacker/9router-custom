@@ -1,0 +1,14 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {candidate,patchDigest}=require('../scripts/resolve-upstream.cjs');
+const input={manifest:{digest:'sha256:'+'a'.repeat(64)},sourceSha:'b'.repeat(40),patchesSha:'c'.repeat(64),repository:'AlanBacker/9router-autopatch'};
+const first=candidate(input);assert(first.changed);assert.equal(first.publishImage,'ghcr.io/alanbacker/9router-autopatch');assert.equal(first.upstream.image,'decolua/9router@sha256:'+'a'.repeat(64));
+assert.equal(candidate({...input,previous:first}).changed,false);
+assert.equal(candidate({...input,previous:first,force:true}).changed,true);
+assert.equal(candidate({...input,previous:first,manifest:{digest:'sha256:'+'d'.repeat(64)}}).changed,true);
+assert.equal(candidate({...input,previous:first,patchesSha:'e'.repeat(64)}).changed,true);
+assert.equal(candidate({...input,previous:first,sourceSha:'f'.repeat(40)}).changed,true);
+assert.throws(()=>candidate({...input,manifest:{digest:'latest; unsafe'}}),/Invalid/);
+assert.throws(()=>candidate({...input,repository:'unsafe value'}),/Invalid/);
+assert.match(patchDigest(process.cwd()),/^[0-9a-f]{64}$/);
+console.log('PASS: immutable upstream selection, source/patch changes, no-op detection, force rebuild and input validation.');

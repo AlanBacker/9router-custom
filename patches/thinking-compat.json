@@ -1,0 +1,20 @@
+{
+  "hosts": ["opencode.ai"],
+  "paths": [
+    "/inference/v1/chat/completions",
+    "/inference/openai/v1/chat/completions",
+    "/zen/v1/chat/completions",
+    "/zen/go/v1/chat/completions"
+  ],
+  "rules": [
+    {"modelPattern": "^glm(?:-|/)", "drop": ["thinking"]}
+  ],
+  "autoFallback": true,
+  "maxRetries": 2,
+  "learnTtlSeconds": 3600,
+  "maxLearnedRoutes": 256,
+  "reasoningFields": [
+    "thinking", "reasoning_effort", "reasoning", "enable_thinking",
+    "thinking_budget", "thinkingConfig", "output_config"
+  ]
+}
