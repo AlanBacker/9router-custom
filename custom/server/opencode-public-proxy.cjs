@@ -237,7 +237,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     // Prefer an egress no other line holds; when the pool is scarce, the same validated
     // egress may serve several anonymous sessions (upstream rate limits are per session,
     // not per egress), unless sharing is explicitly disabled.
-    const maxLines=Math.max(1,Number(config.maxLinesPerEgress)||6);
+    const maxLines=Math.max(1,Number(config.maxLinesPerEgress)||12);
     const linesOn=url=>{let n=0;for(const u of assignments.values())if(u===url)n++;return n;};
     const alternative=(exclude,respectCapacity=true)=>{
       const excludes=new Set(Array.isArray(exclude)?exclude:exclude?[exclude]:[]);
@@ -329,7 +329,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
   function canAcquire(session){
     if(sessionBusy(session))return false;
     if(bindingValid(session))return true;
-    const maxLines=Math.max(1,Number(config.maxLinesPerEgress)||6);
+    const maxLines=Math.max(1,Number(config.maxLinesPerEgress)||12);
     const counts=new Map();
     for(const u of assignments.values())counts.set(u,(counts.get(u)||0)+1);
     const free=usable().filter(e=>e.inFlight<capacity(e)&&(counts.get(e.url)||0)<maxLines);
