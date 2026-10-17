@@ -101,10 +101,49 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
     if(s.requested.size<8&&/^[a-zA-Z0-9._-]{1,128}$/.test(model))s.requested.add(model);
     void maintain();
     if(!ready(session,model)){
+      // A validated line can drop out for a few seconds while its egress is refreshed or the
+      // pool finds a replacement. Wait briefly and force this line's revalidation instead of
+      // failing the caller instantly. During a total outage the pool often recovers within a few
+      // seconds too, so allow a shorter wait rather than answering instantly. Both paths are
+      // bounded by a real clock and by the per-minute probe budget.
+      const healthy=pool.snapshot?.().healthy||0;
+      const waitMs=healthy>0?(Number(config.admissionWaitMs)||0):(Number(config.admissionShortWaitMs)||0);
+      const connection=(storage.read().connections||[]).find(c=>c.session===session);
+      const until=Date.now()+waitMs;
+      while(waitMs>0&&!ready(session,model)&&Date.now()<until&&used<maxPerMinute){
+        if(connection)await validate(connection,targets(session)).catch(()=>{});
+        if(ready(session,model))break;
+        if(Date.now()>=until||used>=maxPerMinute)break;
+        await new Promise(resolve=>setTimeout(resolve,250));
+      }
+    }
+    if(!ready(session,model)){
       const status=require('./availability-status.cjs').describeUnavailable(snapshot(pool.snapshot()),model,{now:now()});
       return Response.json({error:{type:'OpenCodePublicProxyUnavailable',message:status.lastError.replace(/^OpenCodePublicProxyUnavailable: /,'')}},{status:503,headers:{'retry-after':status.retryAfterHuman.replace(/s$/,'')}});
     }
-    const response=await pool.fetch(input,{...init,[PROBE]:true});
+    let response=await pool.fetch(input,{...init,[PROBE]:true});
+    {
+      // The pool disables its own retry loop for admission-gated traffic, so a blocked egress
+      // (403 FreeTierError) or a dead one (502/504) would otherwise be shown to the user once.
+      // Drop the offending binding, force a revalidation, and retry once on a different egress.
+      const firstDetail=response.ok?undefined:await response.clone().json().catch(()=>undefined);
+      const firstKind=response.ok?'ok':classifyFailure(response.status,firstDetail).kind;
+      const spareBudget=used<maxPerMinute;
+      if(spareBudget&&(firstKind==='access'||firstKind==='gateway')&&firstDetail?.error?.type!=='OpenCodePublicProxyUnavailable'){
+        pool.rejectBinding(session,firstKind==='access'?(config.inferenceRejectCooldownSeconds||1800)*1000:60000,firstKind==='access');
+        void response.body?.cancel().catch(()=>{});
+        const connection=(storage.read().connections||[]).find(c=>c.session===session);
+        if(connection)await validate(connection,targets(session)).catch(()=>{});
+        if(ready(session,model)){
+          const retry=await pool.fetch(input,{...init,[PROBE]:true});
+          if(retry.ok)return retry;
+          const detail=await retry.clone().json().catch(()=>undefined);
+          void retry.body?.cancel().catch(()=>{});
+          s.passed.delete(model);s.reason=`业务请求 HTTP ${retry.status}，等待重新验证`;s.nextAt=now()+1000;pool.publish(true);
+          return pool.handledError(retry,detail);
+        }
+      }
+    }
     if(!response.ok){const detail=await response.clone().json().catch(()=>undefined);if(detail?.error?.type!=='OpenCodePublicProxyUnavailable'||!pool.bindingValid(session)){s.passed.delete(model);s.reason=`业务请求 HTTP ${response.status}，等待重新验证`;s.nextAt=now()+1000;pool.publish(true);}return pool.handledError(response,detail);}
     return response;
   }
