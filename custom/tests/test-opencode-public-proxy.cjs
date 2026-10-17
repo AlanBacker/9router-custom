@@ -168,8 +168,25 @@ const payload=[];
   assert.equal((await pool.fetch(url,options('a'))).status,503,'a single line still serializes its own requests');
   await a1.text();
 }
+// Sharing is bounded: an egress never carries more lines than it can sustain.
+{
+  let clock=860000;
+  const cfg={...config,allowProxySharing:true,targetCount:1,maxLinesPerEgress:1};
+  const storage={read:()=>({config:{enabled:true,targetCount:1},connections:[{session:'a',name:'line a'},{session:'b',name:'line b'}]}),load:()=>null,save:()=>{},status:()=>{}};
+  const nativeFetch=async(u,init={})=>{
+    if(u===cfg.sources[0])return new Response('8.8.8.8:3128');
+    if(u===cfg.ipCheckUrl)return Response.json({ip:init.dispatcher?'9.9.9.9':'4.2.2.2'});
+    if(u===cfg.targetCheckUrl)return Response.json({data:[]});
+    return new Response('data: OK\n\n',{headers:{'content-type':'text/event-stream'}});
+  };
+  const pool=createTransportPool({nativeFetch,makeAgent:u=>({url:u,destroy(){return Promise.resolve()}}),storage,config:cfg,logger:quiet,now:()=>clock});
+  await pool.refresh();
+  const a=await pool.fetch(url,options('a'));assert.equal(a.status,200);await a.text();
+  assert.equal((await pool.fetch(url,options('b'))).status,503,'a per-egress line cap prevents over-subscribing one egress');
+  assert.equal(pool.canAcquire('b'),false,'canAcquire respects the per-egress line cap');
+}
 await updateConfig(async(u,i)=>{payload.push({u,i});return Response.json({opencodePublicProxy:{enabled:true}})},{enabled:true,targetCount:15});
 assert.deepEqual(JSON.parse(payload[0].i.body),{opencodePublicProxy:{enabled:true,targetCount:15}});
 await assert.rejects(updateConfig(async()=>Response.json({error:'Unauthorized'},{status:401}),{enabled:true}),/Unauthorized/);
-console.log('PASS: disabled zero probing; proxy parsing/private IP rejection; live egress dedup; separate line dispatch; stream occupancy; quota cooldown; strict no-direct behavior; key isolation; authenticated toggle payload; stalled maintenance rounds are detected and abandoned without freezing the pool; egresses that fail real inference screening are quarantined instead of being assigned; a throttled screen defers instead of condemning; isolated gateway blips survive a shared egress; scarce pools share one validated egress while serializing each line.');
+console.log('PASS: disabled zero probing; proxy parsing/private IP rejection; live egress dedup; separate line dispatch; stream occupancy; quota cooldown; strict no-direct behavior; key isolation; authenticated toggle payload; stalled maintenance rounds are detected and abandoned without freezing the pool; egresses that fail real inference screening are quarantined instead of being assigned; a throttled screen defers instead of condemning; isolated gateway blips survive a shared egress; scarce pools share one validated egress while serializing each line; per-egress sharing is bounded.');
 })().catch(e=>{console.error(e);process.exitCode=1});

@@ -237,13 +237,17 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     // Prefer an egress no other line holds; when the pool is scarce, the same validated
     // egress may serve several anonymous sessions (upstream rate limits are per session,
     // not per egress), unless sharing is explicitly disabled.
+    const maxLines=Math.max(1,Number(config.maxLinesPerEgress)||6);
+    const linesOn=url=>{let n=0;for(const u of assignments.values())if(u===url)n++;return n;};
     const alternative=(exclude,respectCapacity=true)=>{
       const excludes=new Set(Array.isArray(exclude)?exclude:exclude?[exclude]:[]);
       const occupied=new Set([...assignments.values()]);
       const pool=usable().filter(e=>!excludes.has(e.egress)&&(!respectCapacity||e.inFlight<capacity(e))).sort((a,b)=>((a.inFlight?1:0)-(b.inFlight?1:0))||((a.latency||0)-(b.latency||0)));
-      const exclusive=pool.find(e=>!occupied.has(e.url));
+      const exclusive=pool.find(e=>!occupied.has(e.url)&&linesOn(e.url)<maxLines);
       if(exclusive)return exclusive;
-      return config.allowProxySharing===false?undefined:pool[0];
+      if(config.allowProxySharing===false)return undefined;
+      // Never pile more lines onto an egress than it can reasonably carry.
+      return pool.find(e=>linesOn(e.url)<maxLines);
     };
     for(let attempt=0;attempt<(recovery?2:1);attempt++){
       let entry=entries.get(assignments.get(session));
@@ -325,7 +329,10 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
   function canAcquire(session){
     if(sessionBusy(session))return false;
     if(bindingValid(session))return true;
-    const free=usable().filter(e=>e.inFlight<capacity(e));
+    const maxLines=Math.max(1,Number(config.maxLinesPerEgress)||6);
+    const counts=new Map();
+    for(const u of assignments.values())counts.set(u,(counts.get(u)||0)+1);
+    const free=usable().filter(e=>e.inFlight<capacity(e)&&(counts.get(e.url)||0)<maxLines);
     if(!free.length)return false;
     if(config.allowProxySharing!==false)return true;
     const occupied=new Set(assignments.values());
