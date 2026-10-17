@@ -36,14 +36,14 @@
       const panel=doc.createElement('section');panel.id='9router-opencode-public-proxy';
       panel.style.cssText='border:1px solid #475569;border-radius:12px;padding:20px;margin-bottom:20px;background:rgba(100,116,139,.08);color:inherit';
       panel.innerHTML=`<h2 style="font-size:18px;font-weight:600;margin-bottom:8px">自动公共代理</h2>
-      <p style="font-size:13px;opacity:.8;margin-bottom:14px">自动下载公开列表，检测HTTPS和OpenCode连通性，按实际出口IP去重，为每条匿名线路绑定不同出口。失效后后台补充；可用出口不足时返回错误，不回落直连。</p>
+      <p style="font-size:13px;opacity:.8;margin-bottom:14px">自动下载公开列表并去重出口。每条线路创建后先验证目标模型真实推理，有实际输出并正常结束才参与该模型的轮询；失败自动换候选复测。</p>
       <form style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
       <label style="display:flex;gap:7px;align-items:center"><input name="enabled" type="checkbox">启用自动公共代理</label>
       <label style="display:flex;gap:7px;align-items:center"><input name="autoRecover429" type="checkbox">故障自动恢复（限流／代理／会话）</label>
       <label style="font-size:13px">目标出口数 <input name="targetCount" type="number" min="0" max="100" step="1" value="0" required style="width:85px;border:1px solid #64748b;border-radius:7px;padding:7px;background:transparent;color:inherit">（0＝按启用线路数量）</label>
       <button type="submit" style="background:#0d9488;border:0;border-radius:8px;color:white;padding:9px 16px">保存开关</button>
       <button type="button" data-refresh style="border:1px solid #64748b;border-radius:8px;padding:8px 14px;background:transparent;color:inherit">立即补充检测</button></form>
-      <p style="font-size:12px;opacity:.8;margin-top:10px">自动恢复默认关闭。开启后额外预留2个出口；限流、代理拒绝、网关错误或连接失败先冷却原出口，再换一个空闲出口重试，最多1次。仅明确会话失效时更新该会话（每条最多5分钟一次）；鉴权/账号停用隔离对应线路并到期复查，保留错误原因；普通参数错误和端点不可用不会换IP。</p>
+      <p style="font-size:12px;opacity:.8;margin-top:10px">实测准入随自动代理开启。每条每轮最多尝试3个候选，本轮未通过会等待下一轮并自动补充；后台最多同时测试2条、每分钟24次。被拒绝或限流的出口保留冷却，不创建新身份；模型端点暂不可用时等待恢复。业务请求失败后移出对应模型轮询并重新实测。</p>
       <p style="font-size:12px;opacity:.7;margin-top:12px">默认关闭。连通检测不代表免费推理一定可用；上游403或429会冷却该出口并尝试其他线路，不能保证扩量。请求经过第三方代理，始终校验目标HTTPS证书，仅用于OpenCode Free匿名请求。</p>
       <p style="font-size:12px;opacity:.7;margin-top:8px">公开列表：<a style="color:#7dd3fc" href="https://github.com/proxifly/free-proxy-list" target="_blank" rel="noopener noreferrer">Proxifly</a> / <a style="color:#7dd3fc" href="https://github.com/TheSpeedX/PROXY-List" target="_blank" rel="noopener noreferrer">TheSpeedX</a> / <a style="color:#7dd3fc" href="https://github.com/monosans/proxy-list" target="_blank" rel="noopener noreferrer">Monosans</a> / <a style="color:#7dd3fc" href="https://github.com/roosterkid/openproxylist" target="_blank" rel="noopener noreferrer">OpenProxyList</a> / <a style="color:#7dd3fc" href="https://github.com/jetkai/proxy-list" target="_blank" rel="noopener noreferrer">Jetkai</a></p>
       <p role="status" aria-live="polite" style="font-size:13px;margin-top:12px;white-space:pre-wrap">读取状态…</p>
