@@ -38,10 +38,12 @@ async function limitedText(response,maxBytes){
   try{for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;if(bytes>maxBytes)throw new Error('Response too large');out+=decoder.decode(value,{stream:true});}return out+decoder.decode();}
   finally{void reader.cancel().catch(()=>{});}
 }
-function createTransportPool({nativeFetch,makeAgent,storage,config,logger=console,now=Date.now,renewSession=(old,reason)=>globalThis[Symbol.for('9router.opencodeAnonymous.v1')]?.renewInvalidSession(old,reason)}){
+function createTransportPool({nativeFetch,makeAgent,storage,config,logger=console,now=Date.now,screenEgress=null,renewSession=(old,reason)=>globalThis[Symbol.for('9router.opencodeAnonymous.v1')]?.renewInvalidSession(old,reason)}){
   let enabled=false,desired=0,round=null,lastRound=0,lastSources=0,nonce,baseline=null,hydrated=false,generation=0,lastPersist=0;
+  // Round-lifecycle bookkeeping. A maintenance round must never be able to block the pool forever.
+  let roundStartedAt=0,roundToken=0,roundAbandons=0,lastProgressAt=0;
   let candidates=[],tested=0,sourceError=null,sourceStates=[],lastSourceAttempt=0;
-  const entries=new Map(),assignments=new Map(),sessionIssues=new Map();
+  const entries=new Map(),assignments=new Map(),sessionIssues=new Map(),inFlightSessions=new Map(),recentFailures=new Map();
   let recoveryEnabled=false,proxySwitches=0,sessionRepairs=0,recoverySuccesses=0;
   function settings(){
     const s=storage.read();const c=s.config||{};
@@ -58,9 +60,20 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     const t=now(),connections=storage.read().connections||[],names=new Map(connections.map(c=>[c.session,c.name]));
     const lines=[...assignments].map(([session,url])=>{const e=entries.get(url);return {name:names.get(session)||crypto.createHash('sha256').update(session).digest('hex').slice(0,8),proxyUrl:url,egressIp:e?.egress,state:e?.until>t?'cooldown':e?.inFlight?'busy':'ready'};});
     for(const [session,issue]of sessionIssues)if(issue.until>t&&!assignments.has(session))lines.push({name:names.get(session)||'匿名线路',state:'auth-cooldown',until:issue.until,status:issue.status});
-    return {enabled,autoRecover429:recoveryEnabled,proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,healthy:usable().length,assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
+    return {enabled,autoRecover429:recoveryEnabled,proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,healthy:usable().length,assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
   }
   function usable(){return [...entries.values()].filter(e=>e.checkedAt>now()-config.healthMaxAgeSeconds*1000&&e.until<=now()&&!e.failed);}
+  function capacity(e){return Math.max(1,Number(config.maxConcurrentPerEgress)||3);}
+  // Track every egress that recently failed for a line so its retry lands on a different one
+  // (per-line failover). Global quarantine is reserved for repeated/deny outcomes, not one blip.
+  function failedRecently(session){const r=recentFailures.get(session);if(!r)return [];const cut=now()-(config.egressRetryAvoidMs||120000);for(const [egress,at]of r)if(at<cut)r.delete(egress);if(!r.size){recentFailures.delete(session);return [];}return [...r.keys()];}
+  function noteFailure(session,egress){if(!session||!egress)return;let r=recentFailures.get(session);if(!r){r=new Map();recentFailures.set(session,r);}r.set(egress,now());}
+  function roundTimeoutMs(){return Math.max(30000,Number(config.roundTimeoutMs)||120000);}
+  function maintenanceHealth(){
+    const t=now(),age=round?t-roundStartedAt:0,live=roundStartedAt&&lastProgressAt>roundStartedAt;
+    return {roundAgeSeconds:round?Math.round(age/1000):0,roundTimeoutSeconds:Math.round(roundTimeoutMs()/1000),
+      stalled:!!round&&(age>roundTimeoutMs()||(!live&&age>Math.max(15000,roundTimeoutMs()/3))),roundAbandons,lastProgressAt:lastProgressAt||null};
+  }
   function publish(force=false){
     if(!force&&now()-lastPersist<1000)return;
     lastPersist=now();try{
@@ -82,6 +95,15 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     if(!entry.agent)entry.agent=makeAgent(entry.url);
     return entry.agent;
   }
+  function screenCooldown(){return Math.min(86400000,Math.max(60000,(config.screenBlockedCooldownSeconds||1800)*1000));}
+  function egressCooldownMs(delay){return Math.min(Math.max(1000,Number(config.maxEgressCooldownMs)||1800000),Math.max(1000,delay));}
+  // A shared egress must not be quarantined by a single transient gateway error; only repeated
+  // failures (or an explicit 403/429) cool it. Counter resets on any successful response.
+  function penalize(entry,delay,hard){
+    if(hard){entry.until=Math.max(entry.until||0,now()+egressCooldownMs(delay));entry.failures=0;return;}
+    entry.failures=(entry.failures||0)+1;
+    if(entry.failures>=Math.max(1,Number(config.egressFailureThreshold)||3)){entry.until=Math.max(entry.until||0,now()+egressCooldownMs(delay));entry.failures=0;}
+  }
   async function probe(url,gen){
     const previous=entries.get(url);if(previous?.inFlight||previous?.until>now())return;
     const agent=previous?.agent||makeAgent(url),start=now();
@@ -98,7 +120,30 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
       if(!enabled||gen!==generation)throw new Error('Disabled while checking');
       // Recheck after async probes so equal egresses cannot race into the pool.
       if([...entries.values()].some(e=>e.url!==url&&e.egress===ip&&!e.failed&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000))throw new Error('Duplicate egress');
-      entries.set(url,{url,egress:ip,checkedAt:now(),until:previous?.until||0,failed:false,agent,inFlight:0,latency:now()-start});
+      // Connectivity alone is not enough: some egress IPs are rejected by the free-tier anti-abuse gate.
+      // Screen with a real (tiny) inference before the proxy is ever handed to an account.
+      // The screen is advisory: only a definite 403 (egress IP refused) quarantines a proxy. A throttled
+      // screening identity, timeout or builder failure must never zero the whole pool.
+      if(screenEgress&&config.screenInference!==false){
+        const screen=await screenEgress(url,agent);
+        if(screen.status===403){
+          const wait=screenCooldown();
+          entries.set(url,{url,egress:ip,checkedAt:now(),until:now()+wait,failed:true,blocked:true,screenStatus:403,agent:null,inFlight:0,latency:now()-start});
+          void agent.destroy();
+          logger.info?.(`[OpenCodePublicProxy] Egress rejected by inference screen proxy=${url} egress=${ip} status=403; cooldown=${Math.round(wait/1000)}s`);
+          lastProgressAt=now();
+          return;
+        }
+        if(!screen.ok){
+          const wait=Math.min(120,Math.max(15,Number(screen.retryAfter)||60));
+          entries.set(url,{url,egress:ip,checkedAt:now(),until:now()+wait*1000,failed:false,blocked:false,screenStatus:screen.status||screen.error||'unscreened',agent,inFlight:0,failures:previous?.failures||0,latency:now()-start});
+          lastProgressAt=now();
+          logger.info?.(`[OpenCodePublicProxy] Egress admitted without a passing screen proxy=${url} egress=${ip} reason=${screen.status||screen.skipped||screen.error||'n/a'}; defer=${wait}s`);
+          return;
+        }
+      }
+      entries.set(url,{url,egress:ip,checkedAt:now(),until:previous?.until||0,failed:false,blocked:false,agent,inFlight:0,failures:0,latency:now()-start});
+      lastProgressAt=now();
       logger.info?.(`[OpenCodePublicProxy] Healthy proxy=${url} egress=${ip}`);
     }catch{
       if(previous){previous.failed=true;if(previous.agent===agent)previous.agent=null;}
@@ -106,12 +151,19 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     }finally{tested++;publish();}
   }
   async function refresh(){
-    if(round)return round;
     const s=settings();if(!enabled){publish();return;}
+    if(round){
+      const age=now()-roundStartedAt;
+      if(age<=roundTimeoutMs())return round;
+      // A round that never settles must never be allowed to freeze all future maintenance.
+      logger.warn?.(`[OpenCodePublicProxy] Maintenance round stalled ${Math.round(age/1000)}s (limit ${Math.round(roundTimeoutMs()/1000)}s); abandoning it so later ticks can proceed`);
+      roundAbandons++;round=null;generation++;heat();
+    }
     hydrate();const gen=generation;const force=s.config.refreshNonce!==nonce;nonce=s.config.refreshNonce;
     if(!force&&now()-lastRound<config.replenishIntervalSeconds*1000)return;
     lastRound=now();
-    round=(async()=>{
+    const token=++roundToken;roundStartedAt=now();lastProgressAt=now();
+    const work=(async()=>{
       try{
         if(!baseline){const r=await nativeFetch(config.ipCheckUrl,{redirect:'error',signal:AbortSignal.timeout(config.probeTimeoutMs)});if(r.ok)baseline=JSON.parse(await limitedText(r,4096)).ip;}
         if(!publicIPv4(baseline))throw new Error('无法确认服务器出口IP，暂停代理检测');
@@ -128,6 +180,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
             candidates=fresh;lastSources=now();sourceError=null;
           }else sourceError='公共列表暂时不可用或没有合格HTTP(S)地址';
         }
+        lastProgressAt=now();
         // Revalidate known exits first after restart or failure; do not bury them in a shuffled public list.
         const due=[...entries.values()].filter(e=>!e.inFlight&&e.until<=now()&&(e.failed||e.checkedAt<=now()-config.healthMaxAgeSeconds*1000)).map(e=>e.url);
         const pending=[...new Set([...due,...candidates])];
@@ -138,15 +191,22 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
             if(usable().length>=desired)break;
             const url=queue[index++];const e=entries.get(url);
             if(e&&!e.failed&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000)continue;
-            await probe(url,gen);
+            await guard(probe(url,gen),Math.max(15000,(config.probeTimeoutMs||6000)*4),'probe '+url);lastProgressAt=now();
           }
         }));
-        candidates.unshift(...queue.slice(index));
-        if(!usable().length&&!sourceError)sourceError='尚未找到同时通过HTTPS及OpenCode连通检测的独立出口，继续后台补充';
-      }catch(e){sourceError=String(e.message).slice(0,200);}
-      finally{round=null;publish(true);}
+        if(token===roundToken){candidates.unshift(...queue.slice(index));if(!usable().length&&!sourceError)sourceError='尚未找到同时通过HTTPS及OpenCode连通检测的独立出口，继续后台补充';}
+      }catch(e){if(token===roundToken)sourceError=String(e.message).slice(0,200);}
+      finally{if(token===roundToken){round=null;publish(true);}}
     })();
-    publish(true);return round;
+    round=work;publish(true);return work;
+  }
+  // Record that real maintenance work happened (used for stall detection).
+  function heat(){lastProgressAt=now();}
+  // Hard per-step deadline: a single orphaned stream must not hold the whole round open.
+  function guard(promise,ms,label){
+    let timer;
+    const timeout=new Promise(resolve=>{timer=setTimeout(()=>{logger.warn?.(`[OpenCodePublicProxy] ${label} exceeded ${ms}ms; skipping this candidate`);resolve('timeout');},ms);if(timer.unref)timer.unref();});
+    return Promise.race([promise,timeout]).finally(()=>clearTimeout(timer));
   }
   function failure(message,seconds=5){return new Response(JSON.stringify({error:{type:'OpenCodePublicProxyUnavailable',message}}),{status:503,headers:{'content-type':'application/json','retry-after':String(seconds)}});}
   function handledError(response,detail){
@@ -174,20 +234,33 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     const recovery=s.config.autoRecover429===true&&!init[Symbol.for('9router.opencodeAdmissionProbe.v1')];
     const paused=sessionIssues.get(session);if(recovery&&paused?.until>now())return failure('自动公共代理：当前匿名线路因鉴权或账号异常暂时隔离，冷却到期后自动复查；其他线路仍可使用',Math.max(1,Math.ceil((paused.until-now())/1000)));
     const valid=e=>e&&!e.failed&&e.until<=now()&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000;
-    const alternative=exclude=>{
+    // Prefer an egress no other line holds; when the pool is scarce, the same validated
+    // egress may serve several anonymous sessions (upstream rate limits are per session,
+    // not per egress), unless sharing is explicitly disabled.
+    const alternative=(exclude,respectCapacity=true)=>{
+      const excludes=new Set(Array.isArray(exclude)?exclude:exclude?[exclude]:[]);
       const occupied=new Set([...assignments.values()]);
-      return usable().filter(e=>!occupied.has(e.url)&&!e.inFlight&&e.egress!==exclude).sort((a,b)=>(a.latency||0)-(b.latency||0))[0];
+      const pool=usable().filter(e=>!excludes.has(e.egress)&&(!respectCapacity||e.inFlight<capacity(e))).sort((a,b)=>((a.inFlight?1:0)-(b.inFlight?1:0))||((a.latency||0)-(b.latency||0)));
+      const exclusive=pool.find(e=>!occupied.has(e.url));
+      if(exclusive)return exclusive;
+      return config.allowProxySharing===false?undefined:pool[0];
     };
     for(let attempt=0;attempt<(recovery?2:1);attempt++){
       let entry=entries.get(assignments.get(session));
-      if(!valid(entry)){
-        assignments.delete(session);entry=alternative();
-        if(!entry)return failure('自动公共代理已开启，但独立可用出口不足；正在检测和补充，没有回落直连');
+      // After a failure, move this line onto a different validated egress before it is retried.
+      const recent=failedRecently(session);
+      const saturated=!!(entry&&valid(entry)&&entry.inFlight>=capacity(entry));
+      if(!valid(entry)||(entry&&recent.includes(entry.egress))||saturated){
+        assignments.delete(session);
+        // Saturated: never pile more work onto an egress that is already at its limit.
+        entry=alternative(recent)||(saturated?undefined:alternative(recent,false)||alternative());
+        if(!entry)return failure(saturated?'自动公共代理：所有已验证出口都在满负荷处理请求，请稍后重试':'自动公共代理已开启，但独立可用出口不足；正在检测和补充，没有回落直连');
         assignments.set(session,entry.url);
       }
-      if(entry.inFlight)return failure('这条匿名线路正在处理请求，请使用其他空闲线路或稍后重试');
+      if(inFlightSessions.has(session))return failure('这条匿名线路正在处理请求，请使用其他空闲线路或稍后重试');
+      const held=session;inFlightSessions.set(held,(inFlightSessions.get(held)||0)+1);
       entry.inFlight++;
-      const end=()=>{entry.inFlight=Math.max(0,entry.inFlight-1);publish(true);};
+      const end=()=>{const n=(inFlightSessions.get(held)||1)-1;if(n>0)inFlightSessions.set(held,n);else inFlightSessions.delete(held);entry.inFlight=Math.max(0,entry.inFlight-1);publish(true);};
       try{
         const response=await nativeFetch(input,{...init,headers,dispatcher:dispatcher(entry),[EGRESS]:entry.egress});
         let detail;
@@ -201,7 +274,8 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
         if(['rate','access','gateway'].includes(issue.kind)){
           const retry=response.headers.get('retry-after'),number=Number(retry);
           const delay=retry&&Number.isFinite(number)?number*1000:retry?Date.parse(retry)-now():issue.kind==='access'?300000:60000;
-          entry.until=now()+Math.min(86400000,Math.max(1000,Number.isFinite(delay)?delay:60000));
+          penalize(entry,Number.isFinite(delay)?delay:60000,issue.kind!=='gateway');
+          noteFailure(session,entry.egress);
         }
         const canRecover=recovery&&attempt===0&&!init.signal?.aborted&&shouldStop429Fallback();
         if(canRecover&&['rate','access','gateway'].includes(issue.kind)){
@@ -225,12 +299,13 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
           }
         }
         if(!response.ok){end();return recovery&&issue.kind!=='other'?handledError(response,detail):response;}
-        if(attempt>0)recoverySuccesses++;
+        if(attempt>0)recoverySuccesses++;entry.failures=0;
+        const cleared=recentFailures.get(session);if(cleared){cleared.delete(entry.egress);if(!cleared.size)recentFailures.delete(session);}
         publish(true);return releaseAfterBody(response,end);
       }catch(e){
         if(init.signal?.aborted){end();throw e;}
         const transport=transportFailure(e);
-        if(transport){entry.failed=true;entry.until=now()+60000;assignments.delete(session);}
+        if(transport){entry.failed=true;entry.until=now()+30000;noteFailure(session,entry.egress);assignments.delete(session);}
         end();
         if(recovery&&transport){
           const replacement=attempt===0&&shouldStop429Fallback()?alternative(entry.egress):null;
@@ -245,16 +320,75 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
   function tick(){try{settings();if(enabled)void refresh();else publish();}catch(e){logger.warn?.('[OpenCodePublicProxy] Settings unavailable: '+e.message);}}
   function getBinding(session){return entries.get(assignments.get(session));}
   function bindingValid(session){const e=getBinding(session);return !!(e&&!e.failed&&e.until<=now()&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000);}
-  function rejectBinding(session,delay){const e=getBinding(session);if(e)e.until=Math.max(e.until||0,now()+delay);assignments.delete(session);publish(true);}
-  function canAcquire(session){if(bindingValid(session)&&!getBinding(session).inFlight)return true;const occupied=new Set(assignments.values());return usable().some(e=>!e.inFlight&&!occupied.has(e.url));}
-  return {fetch:fetchWithPool,refresh,tick,snapshot,shouldStop429Fallback,getBinding,bindingValid,rejectBinding,canAcquire,publish,handledError};
+  function rejectBinding(session,delay,hard=true){const e=getBinding(session);if(e){penalize(e,delay,hard);noteFailure(session,e.egress);}assignments.delete(session);publish(true);}
+  function sessionBusy(session){return inFlightSessions.has(session);}
+  function canAcquire(session){
+    if(sessionBusy(session))return false;
+    if(bindingValid(session))return true;
+    const free=usable().filter(e=>e.inFlight<capacity(e));
+    if(!free.length)return false;
+    if(config.allowProxySharing!==false)return true;
+    const occupied=new Set(assignments.values());
+    return free.some(e=>!occupied.has(e.url));
+  }
+  return {fetch:fetchWithPool,refresh,tick,snapshot,shouldStop429Fallback,getBinding,bindingValid,rejectBinding,canAcquire,sessionBusy,publish,handledError};
 }
 
+function createEgressScreen(options){
+  const {buildProbe,consumeProbe}=require('./opencode-inference-probe.cjs');
+  const config=options.config,logger=options.logger||console,now=options.now||Date.now;
+  const model=config.screenModel||(config.probeModels||[])[0];
+  const size=Math.max(1,Math.min(12,Number(config.screenSessions)||4));
+  const sessions=[],cooling=new Map();
+  let cursor=0,builderWarned=false,throttleLogged=0;
+  function sessionAt(index){
+    if(sessions[index])return sessions[index];
+    try{
+      const hook=globalThis[Symbol.for('9router.opencodeAnonymous.v1')];
+      sessions[index]=hook?.getManagedSession?.({connectionId:`opencode-egress-screen-${index}`,providerSpecificData:{opencodePoolManaged:true}})||null;
+    }catch{sessions[index]=null;}
+    return sessions[index];
+  }
+  // Rotate dedicated screening identities so one throttled session cannot condemn every proxy.
+  function pick(){
+    const t=now();
+    for(let i=0;i<size;i++){
+      const index=(cursor+i)%size;
+      if((cooling.get(index)||0)>t)continue;
+      const id=sessionAt(index);
+      if(!id)continue;
+      cursor=(index+1)%size;
+      return {index,id};
+    }
+    return null;
+  }
+  return async function screenEgress(url,agent){
+    if(!model)return {ok:true,status:0,skipped:'no-model'};
+    const slot=pick();
+    if(!slot)return {ok:true,status:0,skipped:'screen-sessions-cooling'};
+    let request;
+    try{request=await buildProbe(model,slot.id,config);}
+    catch(e){if(!builderWarned){builderWarned=true;logger.warn?.('[OpenCodePublicProxy] Egress inference screen unavailable: '+e.message);}return {ok:true,status:0,skipped:'builder'};}
+    try{
+      const response=await options.nativeFetch(request.url,{...request.init,dispatcher:agent,signal:AbortSignal.timeout(config.inferenceTimeoutMs||12000)});
+      const result=await consumeProbe(response);
+      if(result.status===429){
+        const wait=Math.min(1800,Math.max(60,Number(result.retryAfter)||180));
+        cooling.set(slot.index,now()+wait*1000);
+        if(now()-throttleLogged>60000){throttleLogged=now();logger.warn?.(`[OpenCodePublicProxy] Inference screen identity ${slot.index} throttled; rotating screening sessions (retry in ${wait}s)`);}
+      }
+      return {ok:result.ok,status:result.status,detail:result.detail,retryAfter:result.retryAfter};
+    }catch(e){
+      return {ok:false,status:0,error:String(e?.cause?.code||e?.code||e?.name||e)};
+    }
+  };
+}
 function createPool(options){
   if(options.config.inferenceValidation!==true)return createTransportPool(options);
   let admission;
   const storage={...options.storage,status:value=>options.storage.status(admission?admission.snapshot(value):value)};
-  const pool=createTransportPool({...options,storage});
+  const screenEgress=options.config.screenInference===false?null:createEgressScreen(options);
+  const pool=createTransportPool({...options,storage,screenEgress});
   admission=require('./opencode-admission.cjs').createAdmission({...options,pool});
   function getUnavailable(model){const base=pool.snapshot();return require('./availability-status.cjs').describeUnavailable(admission.snapshot(base),model,{now:(options.now||Date.now)(),busyCount:base.lines.filter(l=>l.state==='busy').length});}
   return {...pool,fetch:admission.fetch,snapshot:()=>admission.snapshot(pool.snapshot()),getUnavailable,canRoute:admission.canRoute,maintain:admission.maintain,tick(){pool.tick();void admission.maintain().catch(e=>(options.logger||console).warn?.('[OpenCodeAdmission] '+e.message));}};
@@ -286,7 +420,7 @@ function getProxyAgent(){
   }
   return require('node:module').createRequire(path.join(process.env.NINEROUTER_APP_ROOT||process.cwd(),'package.json'))('undici').ProxyAgent;
 }
-module.exports={publicIPv4,normalizeProxy,parseCandidates,mergeCandidates,createPool,limitedText,getProxyAgent};
+module.exports={publicIPv4,normalizeProxy,parseCandidates,mergeCandidates,createPool,createTransportPool,limitedText,getProxyAgent};
 if(process.env.NINEROUTER_OPENCODE_PUBLIC_PROXY==='1'&&!globalThis[MARK]){
   const config=JSON.parse(fs.readFileSync(path.join(__dirname,'opencode-public-proxy.json'),'utf8'));
   if(process.env.DATA_DIR)for(const key of ['dbFile','stateFile'])config[key]=config[key].replace(/^\/app\/data(?=\/|$)/,process.env.DATA_DIR);

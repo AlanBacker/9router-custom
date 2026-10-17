@@ -4,6 +4,7 @@ const {classifyFailure}=require('./opencode-recovery-rules.cjs');
 const PROBE=Symbol.for('9router.opencodeAdmissionProbe.v1');
 function createAdmission({pool,storage,config,now=Date.now,logger=console,builder=buildProbe}){
   const states=new Map(),modelPauses=new Map();let round=null,windowStart=now(),used=0,cursor=0;
+  let roundStartedAt=0,roundToken=0;
   const maxPerMinute=config.inferenceProbesPerMinute||24,concurrency=config.inferenceConcurrency||2;
   const models=()=>{const c=storage.read().config||{};return [...new Set((Array.isArray(c.probeModels)?c.probeModels:config.probeModels||[]).filter(m=>typeof m==='string'&&/^[a-zA-Z0-9._-]{1,128}$/.test(m)))].slice(0,8);};
   const enabled=()=>storage.read().config?.enabled===true;
@@ -18,8 +19,11 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
     if(!enabled())return true;
     const c=(storage.read().connections||[]).find(c=>c.id===id);if(!c?.session)return false;
     const normalized=String(model||'').replace(/\([^()]*\)$/,'');if(normalized&&/^[a-zA-Z0-9._-]{1,128}$/.test(normalized)&&state(c.session).requested.size<8)state(c.session).requested.add(normalized);
-    if(state(c.session).testing||pool.getBinding(c.session)?.inFlight)return false;
-    return isReady(c.session,normalized||null);
+    // A line that is validating one model may still serve another model it already passed.
+    // Only the requested model's readiness gates routing; unrelated validation must not hide a usable line.
+    if(!isReady(c.session,normalized||null))return false;
+    if(pool.sessionBusy?pool.sessionBusy(c.session):pool.getBinding(c.session)?.inFlight)return false;
+    return true;
   }
   function snapshot(base){
     if(!enabled())return {...base,admissionEnabled:false};
@@ -61,21 +65,31 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
         if(['auth','session','endpoint','other'].includes(issue.kind)||[400,404,422].includes(result.status)){
           const seconds=Number(result.retryAfter),date=Date.parse(result.retryAfter||'');s.nextAt=now()+(Number.isFinite(seconds)&&seconds>0?Math.min(seconds,86400)*1000:Number.isFinite(date)&&date>now()?Math.min(date-now(),86400000):30000);if(issue.kind==='endpoint')modelPauses.set(model,s.nextAt);return;
         }
-        pool.rejectBinding(session,result.status===403?(config.inferenceRejectCooldownSeconds||1800)*1000:60000);
-        s.passed.clear();pool.publish(true);
+        pool.rejectBinding(session,result.status===403?(config.inferenceRejectCooldownSeconds||1800)*1000:60000,result.status===403);
+        // Only the failing model loses its pass; other models on this line keep theirs.
+        s.passed.delete(model);pool.publish(true);
       }
       if(!isReady(session,null))s.nextAt=now()+(config.inferenceRetrySeconds||15)*1000;
     }finally{s.testing=false;pool.publish(true);}
   }
   async function maintain(){
-    if(round)return round;if(!enabled())return;
+    if(!enabled())return;
+    if(round){
+      const age=now()-roundStartedAt;
+      if(age<=(config.inferenceRoundTimeoutMs||180000))return round;
+      // Never let a stalled validation round block future validation work.
+      logger.warn?.(`[OpenCodeAdmission] Validation round stalled ${Math.round(age/1000)}s; abandoning it so later rounds can proceed`);
+      round=null;
+    }
     if(now()-windowStart>=60000){windowStart=now();used=0;}
     const connections=(storage.read().connections||[]).filter(c=>c.session);
     const active=new Set(connections.map(c=>c.session));for(const session of states.keys())if(!active.has(session))states.delete(session);
     if(!connections.length||used>=maxPerMinute)return;
     const queue=connections.slice(cursor).concat(connections.slice(0,cursor)).filter(c=>!isReady(c.session,null));cursor=(cursor+Math.max(1,concurrency))%connections.length;
     let index=0;
-    round=(async()=>{try{await Promise.all(Array.from({length:concurrency},async()=>{while(enabled()&&used<maxPerMinute&&index<queue.length){const c=queue[index++];await validate(c,targets(c.session));}}));}finally{round=null;pool.publish(true);}})();
+    const token=++roundToken;roundStartedAt=now();
+    const work=(async()=>{try{await Promise.all(Array.from({length:concurrency},async()=>{while(enabled()&&used<maxPerMinute&&index<queue.length){const c=queue[index++];await validate(c,targets(c.session));}}));}finally{if(token===roundToken)round=null;pool.publish(true);}})();
+    round=work;
     return round;
   }
   async function fetch(input,init){
