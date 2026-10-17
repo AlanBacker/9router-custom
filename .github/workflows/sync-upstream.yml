@@ -39,7 +39,7 @@ jobs:
       - name: Resolve immutable upstream image and source commit
         id: upstream
         env:
-          FORCE_BUILD: ${{ github.event_name != 'schedule' || inputs.force == true }}
+          FORCE_BUILD: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.force == true) }}
         run: node scripts/resolve-upstream.cjs
       - name: Checkout matching test source snapshot
         if: steps.upstream.outputs.changed == 'true'
