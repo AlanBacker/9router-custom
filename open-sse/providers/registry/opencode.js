@@ -10,8 +10,8 @@ export default {
     color: "#E87040",
     textIcon: "OC",
   },
-  category: "free",
-  noAuth: true,
+  category: "freeTier",
+  noAuth: false/*9R_OC_POOL_V1*/,authModes:["apikey"],
   transport: {
     baseUrl: "https://opencode.ai",
     headers: {

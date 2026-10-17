@@ -101,3 +101,9 @@ graphify-out/*
 .start-dev.ps1
 start-dev-silent.cjs
 debug.log
+
+# Custom source development
+**/node_modules/
+.cache/
+custom/build-manifest.json
+!custom/server/runtime/package-lock.json

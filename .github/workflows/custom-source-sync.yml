@@ -1,0 +1,82 @@
+name: Sync official source and build custom 9Router
+on:
+  push:
+    branches: [main]
+    paths-ignore: [custom/upstream.lock.json]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        type: boolean
+        default: true
+        description: Build even if the source has not changed
+  schedule:
+    - cron: '17 */6 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: native-source-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  sync-test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+      - name: Merge upstream source and reapply source customizations
+        id: source
+        env:
+          FORCE_BUILD: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.force == true) }}
+        run: node custom/scripts/prepare-sync.cjs
+      - name: Install pinned transport for tests
+        if: steps.source.outputs.changed == 'true'
+        working-directory: custom/server/runtime
+        run: npm ci --ignore-scripts
+      - name: Test actual customized source and recovery behavior
+        if: steps.source.outputs.changed == 'true'
+        run: npm run test:custom
+      - name: Compile full customized 9Router source
+        if: steps.source.outputs.changed == 'true'
+        env:
+          SOURCE_REVISION: ${{ steps.source.outputs.revision }}
+        run: docker build --build-arg "CUSTOM_REVISION=$SOURCE_REVISION" -t 9router-custom:ci .
+      - name: Test startup, dashboard auth, native build and restart
+        if: steps.source.outputs.changed == 'true'
+        run: node custom/scripts/smoke.cjs
+      - name: Publish verified source-built image
+        if: steps.source.outputs.changed == 'true' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.source.outputs.image }}
+          SOURCE_REVISION: ${{ steps.source.outputs.revision }}
+          BASE_HEAD: ${{ steps.source.outputs.baseHead }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_head=$(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' ls-remote origin refs/heads/main | cut -f1)
+          test "$remote_head" = "$BASE_HEAD" || { echo 'main changed during build; keeping the previously verified image.'; exit 1; }
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag 9router-custom:ci "$IMAGE:sha-$SOURCE_REVISION"
+          docker push "$IMAGE:sha-$SOURCE_REVISION"
+          docker tag 9router-custom:ci "$IMAGE:stable"
+          docker push "$IMAGE:stable"
+      - name: Save synchronized full source and unmodified upstream branch
+        if: steps.source.outputs.changed == 'true' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_SHA: ${{ steps.source.outputs.sourceSha }}
+        run: git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push --atomic origin HEAD:refs/heads/main "$UPSTREAM_SHA:refs/heads/upstream"
+      - name: Report no source changes
+        if: steps.source.outputs.changed != 'true'
+        run: echo 'Official source and customized tree are unchanged. No rebuild or publication needed.' >> "$GITHUB_STEP_SUMMARY"

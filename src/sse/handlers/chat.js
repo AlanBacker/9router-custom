@@ -1,3 +1,4 @@
+import { shouldStopOpenCodeFallback } from "open-sse/services/opencodeCustom.js";
 import "open-sse/index.js";
 
 import {
@@ -322,6 +323,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     });
 
+    if (shouldStopOpenCodeFallback(provider, result)) return result.response;
     if (result.success) return result.response;
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking

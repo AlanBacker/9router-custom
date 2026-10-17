@@ -1,3 +1,5 @@
+require("./custom/scripts/verify-build.cjs").verifyIfBuilt();
+require("./custom/server/preload.cjs");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");

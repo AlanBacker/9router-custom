@@ -1,3 +1,4 @@
+import { CUSTOM_ANONYMOUS_HOOK } from "../config/opencodeCustom.js";
 import crypto from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
@@ -324,7 +325,7 @@ export class OpenCodeExecutor extends BaseExecutor {
     super("opencode", PROVIDERS.opencode);
   }
 
-  prepareRequestCredentials({ body, credentials, providerSessionId, clientTool } = {}) {
+  prepareRequestCredentials({ body, credentials, providerSessionId, clientTool } = {}) {/*9R_OC_ANONYMOUS_V1*/const __ocSession=globalThis[Symbol.for(CUSTOM_ANONYMOUS_HOOK)]?.getManagedSession(credentials);if(__ocSession)return{...credentials,_opencodeSession:__ocSession};
     const sourceCredentials = credentials || {};
     const session = resolveOpencodeSession(body, sourceCredentials, providerSessionId, clientTool);
 

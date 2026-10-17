@@ -1,0 +1,10 @@
+'use strict';
+const path=require('node:path'),os=require('node:os');
+process.env.NINEROUTER_APP_ROOT=path.resolve(__dirname,'../..');
+process.env.DATA_DIR=process.env.DATA_DIR||path.join(os.homedir(),'.9router');
+process.env.NINEROUTER_THINKING_COMPAT='1';
+process.env.NINEROUTER_OPENCODE_ANONYMOUS='1';
+process.env.NINEROUTER_OPENCODE_PUBLIC_PROXY='1';
+require('./thinking-compat.cjs');
+require('./opencode-anonymous.cjs');
+require('./opencode-public-proxy.cjs');

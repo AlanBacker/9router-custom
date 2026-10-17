@@ -31,7 +31,11 @@ RUN --mount=type=cache,target=/root/.npm \
 
 COPY . ./
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm run build
+# CUSTOM_SOURCE_BUILD: compile customized source; never rewrite .next bundles.
+RUN node custom/scripts/apply-source.cjs --check \
+ && npm ci --prefix /app/custom/server/runtime --ignore-scripts --omit=dev \
+ && npm run build \
+ && node custom/scripts/verify-build.cjs --write
 
 FROM ${NODE_IMAGE} AS runner
 ARG ALPINE_MIRROR
@@ -45,6 +49,9 @@ RUN if [ "$ALPINE_MIRROR" != "dl-cdn.alpinelinux.org" ]; then \
 LABEL org.opencontainers.image.title="9router" \
       org.opencontainers.image.version="${APP_VERSION}"
 
+ARG CUSTOM_REVISION=local
+LABEL org.opencontainers.image.source="https://github.com/AlanBacker/9router-custom" \
+      org.opencontainers.image.revision="${CUSTOM_REVISION}"
 ENV NODE_ENV=production
 ENV PORT=20128
 ENV HOSTNAME=0.0.0.0
@@ -56,6 +63,9 @@ COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/custom-server.js ./custom-server.js
 COPY --from=builder /app/open-sse ./open-sse
+COPY --from=builder /app/custom ./custom
+COPY --from=builder /app/LICENSE ./LICENSE
+COPY --from=builder /app/src/sse/handlers/chat.js ./src/sse/handlers/chat.js
 # Next file tracing can omit sibling files; MITM runs server.js as a separate process.
 COPY --from=builder /app/src/mitm ./src/mitm
 # Standalone node_modules may omit deps only required by the MITM child process.

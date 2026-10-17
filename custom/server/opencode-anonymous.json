@@ -1,0 +1,20 @@
+{
+  "hosts": ["opencode.ai"],
+  "paths": [
+    "/inference/v1/chat/completions",
+    "/inference/v1/responses",
+    "/inference/v1/messages",
+    "/inference/openai/v1/chat/completions",
+    "/inference/openai/v1/responses",
+    "/inference/anthropic/v1/messages"
+  ],
+  "routeOverrides": {
+    "/inference/v1/chat/completions": "/inference/openai/v1/chat/completions"
+  },
+  "sessionFile": "/app/data/opencode-anonymous-sessions.json",
+  "maxSessions": 5000,
+  "maxCooldowns": 512,
+  "endpointCooldownSeconds": 5,
+  "defaultSessionCooldownSeconds": 2,
+  "maxCooldownSeconds": 86400
+}

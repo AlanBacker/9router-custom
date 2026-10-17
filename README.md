@@ -1,3 +1,5 @@
+> **9Router Custom** — 完整源码定制仓库。自动合并官方源码并重新应用定制；[定制功能与同步方式](custom/README.md)。
+
 <div align="center">
   <img src="./images/9router.png?1" alt="9Router Dashboard" width="800"/>
   

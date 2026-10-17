@@ -1,3 +1,4 @@
+import { CUSTOM_EXPLICIT_LOW_MODEL } from "../../config/opencodeCustom.js";
 // Unified thinking normalization: extract client intent → apply provider-native format.
 // Config-driven: thinking format/limits come from capabilities.js + registry transport,
 // never hardcoded per-model here. See .docs/thinking/plan.md MATRIX VI-A.
@@ -353,7 +354,7 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
       // on opencode-go, probed live) 400 on "max" — clamp to high when the declared
       // levels exclude it.
       const level = toLevel(eff);
-      const want = level === "xhigh" || level === "max" ? "max" : "high";
+      const want = /*9R_DS41_LOW_V1*/(level==="low"&&CUSTOM_EXPLICIT_LOW_MODEL.test(String(body.model||""))?"low":(level === "xhigh" || level === "max" ? "max" : "high"));
       body.reasoning_effort = want === "max" && supportedLevels && !supportedLevels.includes("max") ? "high" : want;
       break;
     }
