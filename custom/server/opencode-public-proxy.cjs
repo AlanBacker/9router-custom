@@ -85,7 +85,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
   // Paid egresses are preferred over the free pool, carry more concurrency, and a slot that is
   // refused is re-minted with a fresh session id (a different exit IP) instead of being parked
   // for the full cooldown. Traffic is billed per GB upstream, so re-minting is free.
-  const paidFile={sig:'',list:[]};
+  const paidFile={sig:'',list:[],template:null,count:0};
   let paidIds={};
   const paidSlotRotatedAt=new Map();
   function paidList(){
@@ -100,14 +100,18 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
         const stat=fs.statSync(config.paidEgressFile),sig=stat.mtimeMs+':'+stat.size;
         if(paidFile.sig!==sig){
           const raw=JSON.parse(fs.readFileSync(config.paidEgressFile,'utf8'));
-          paidFile.sig=sig;paidFile.list=Array.isArray(raw)?raw:(Array.isArray(raw?.egresses)?raw.egresses:[]);
+          const obj=Array.isArray(raw)?{egresses:raw}:(raw||{});
+          paidFile.sig=sig;paidFile.list=Array.isArray(obj.egresses)?obj.egresses:[];
+          // The template lives here too so a redeploy of the config file cannot wipe it.
+          paidFile.template=typeof obj.template==='string'&&obj.template.includes('{id}')?obj.template:null;
+          paidFile.count=Number(obj.count)||0;
         }
         paidFile.list.forEach((item,i)=>push(item,'file'+i));
-      }catch{paidFile.sig='';paidFile.list=[];}
+      }catch{paidFile.sig='';paidFile.list=[];paidFile.template=null;paidFile.count=0;}
     }
     (Array.isArray(config.paidEgressUrls)?config.paidEgressUrls:[]).forEach((item,i)=>push(item,'cfg'+i));
-    const template=typeof config.paidEgressTemplate==='string'&&config.paidEgressTemplate.includes('{id}')?config.paidEgressTemplate:null;
-    const count=template?Math.max(0,Math.min(64,Number(config.paidEgressCount)||0)):0;
+    const template=typeof (paidFile.template||config.paidEgressTemplate)==='string'&&(paidFile.template||config.paidEgressTemplate).includes('{id}')?(paidFile.template||config.paidEgressTemplate):null;
+    const count=template?Math.max(0,Math.min(64,Number(paidFile.count||config.paidEgressCount)||0)):0;
     for(let i=0;i<count;i++){const slot='slot'+i;if(!paidIds[slot])paidIds[slot]=crypto.randomBytes(6).toString('hex');push({url:template.replace(/\{id\}/g,paidIds[slot])},slot);}
     return list;
   }

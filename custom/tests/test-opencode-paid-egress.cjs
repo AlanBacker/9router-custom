@@ -22,22 +22,27 @@ const config={
   maxPaidConcurrentPerEgress:9,maxPaidLinesPerEgress:33
 };
 
-function fixture({blockFirstPaid=false}={}){
+function fixture(overrides={}){
+  const {blockFirstPaid=false}=overrides;
+  const cfg={...config,...overrides.config};
   let clock=100000,enabled=true,saved;
   const warns=[],blockedIps=new Set();
   const connections=[{id:'id0',name:'line0',session:'session0'},{id:'id1',name:'line1',session:'session1'},{id:'id2',name:'line2',session:'session2'}];
   const freeIps={'http://8.8.8.8:3128':'9.9.9.9','http://1.1.1.1:8080':'149.112.112.112'};
   // A paid sticky session keeps a stable exit IP per session id, so re-minting changes the IP.
   const ipOf=url=>{
-    if(freeIps[url])return freeIps[url];
-    const m=/session-([0-9a-f]+)/.exec(String(url));
+    const u=String(url||'');
+    if(u.includes('secret-user'))return '45.33.9.9';
+    if(u.includes('8.8.8.8:3128'))return '9.9.9.9';
+    if(u.includes('1.1.1.1:8080'))return '149.112.112.112';
+    const m=/session-([0-9a-f]+)/.exec(u);
     return m?'45.33.1.'+(parseInt(m[1].slice(0,2),16)%200+10):'4.2.2.2';
   };
   const nativeFetch=async(u,init={})=>{
     const url=init.dispatcher?.url;
-    if(u===config.sources[0])return new Response(Object.keys(freeIps).map(x=>x.replace('http://','')).join('\n'));
-    if(u===config.ipCheckUrl)return Response.json({ip:url?ipOf(url):'4.2.2.2'});
-    if(u===config.targetCheckUrl)return Response.json({data:[]});
+    if(u===cfg.sources[0])return new Response(Object.keys(freeIps).map(x=>x.replace('http://','')).join('\n'));
+    if(u===cfg.ipCheckUrl)return Response.json({ip:url?ipOf(url):'4.2.2.2'});
+    if(u===cfg.targetCheckUrl)return Response.json({data:[]});
     if(String(init.body||'').includes('"tools"')){
       const ip=ipOf(url);
       if(blockedIps.has(ip))return Response.json({error:{type:'FreeTierError',message:'Forbidden'}},{status:403});
@@ -47,7 +52,7 @@ function fixture({blockFirstPaid=false}={}){
     return new Response('{}');
   };
   const pool=createPool({
-    nativeFetch,makeAgent:url=>({url,destroy(){return Promise.resolve()}}),config,now:()=>clock,
+    nativeFetch,makeAgent:url=>({url,destroy(){return Promise.resolve()}}),config:cfg,now:()=>clock,
     logger:{info(){},warn:m=>warns.push(String(m))},
     storage:{read:()=>({config:{enabled,targetCount:1,autoRecover429:true,probeModels:['test-free']},connections}),load:()=>saved,save:v=>{saved=v},status(){}}
   });
@@ -91,5 +96,16 @@ const paidUrls=state=>(state.entries||[]).filter(e=>/paid\.example/.test(e.url))
   await r.pool.refresh();
   assert.equal(r.pool.snapshot().paidEgresses,2,'the re-minted slot comes back healthy on a new IP');
 
-  console.log('PASS: paid sticky-session slots are minted, preferred, capped, persisted across restart, and re-minted to a new exit IP when refused.');
+  // The non-committed secret file may carry both a static list and the sticky-session template.
+  const secret=require('node:path').join(require('node:os').tmpdir(),'paid-egress-'+process.pid+'.json');
+  require('node:fs').writeFileSync(secret,JSON.stringify({template:'http://user-session-{id}:pass@paid.example:8080',count:1,egresses:['http://secret-user:secret-pass@8.8.8.8:3128']}));
+  const file=fixture({config:{...config,paidEgressTemplate:null,paidEgressCount:0,paidEgressFile:secret}});
+  await file.pool.refresh();
+  const fileEntries=(file.state().entries||[]).map(e=>e.url);
+  assert.equal(file.pool.snapshot().paidEgresses,2,'secret file contributes a static egress and a minted slot');
+  assert(fileEntries.includes('http://secret-user:secret-pass@8.8.8.8:3128'),'a static paid egress keeps its credentials');
+  assert(fileEntries.filter(u=>/user-session-[0-9a-f]+:pass@paid\.example/.test(u)).length===1,'the file template is minted');
+  require('node:fs').unlinkSync(secret);
+
+  console.log('PASS: paid sticky-session slots are minted, preferred, capped, persisted across restart, re-minted to a new exit IP when refused, and configurable from the secret file.');
 })().catch(e=>{console.error(e);process.exitCode=1});
