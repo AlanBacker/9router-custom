@@ -107,7 +107,11 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
           paidFile.count=Number(obj.count)||0;
         }
         paidFile.list.forEach((item,i)=>push(item,'file'+i));
-      }catch{paidFile.sig='';paidFile.list=[];paidFile.template=null;paidFile.count=0;}
+      }catch(e){
+        // A silent failure here once hid a permissions bug for an hour: paid exits just never appeared.
+        if(e.code!=='ENOENT')logger.warn?.(`[OpenCodePublicProxy] paid egress file ${config.paidEgressFile} unreadable (${e.code||e.message}); paid exits disabled`);
+        paidFile.sig='';paidFile.list=[];paidFile.template=null;paidFile.count=0;
+      }
     }
     (Array.isArray(config.paidEgressUrls)?config.paidEgressUrls:[]).forEach((item,i)=>push(item,'cfg'+i));
     const template=typeof (paidFile.template||config.paidEgressTemplate)==='string'&&(paidFile.template||config.paidEgressTemplate).includes('{id}')?(paidFile.template||config.paidEgressTemplate):null;
@@ -124,6 +128,8 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     publish(true);return true;
   }
   const paidFields=e=>e&&e.paid!=null?{paid:e.paid,paidConcurrency:e.paidConcurrency,paidLines:e.paidLines}:{};
+  // Paid egress URLs carry user:password; never let credentials reach the logs.
+  const redact=value=>String(value).replace(/\/\/[^/@\s]*@/g,'//***@');
   function usable(){return [...entries.values()].filter(e=>e.checkedAt>now()-config.healthMaxAgeSeconds*1000&&e.until<=now()&&!e.failed);}
   function capacity(e){const n=e&&e.paidConcurrency?e.paidConcurrency:config.maxConcurrentPerEgress;return Math.max(1,Number(n)||3);}
   // Track every egress that recently failed for a line so its retry lands on a different one
@@ -195,7 +201,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
           if(rotatePaidSlot(previous?.paid,'screen-403')){entries.delete(url);void agent.destroy();lastProgressAt=now();return;}
           entries.set(url,{url,egress:ip,checkedAt:now(),until:now()+wait,failed:true,blocked:true,screenStatus:403,agent:null,inFlight:0,latency:now()-start,...paidFields(previous)});
           void agent.destroy();
-          logger.info?.(`[OpenCodePublicProxy] Egress rejected by inference screen proxy=${url} egress=${ip} status=403; cooldown=${Math.round(wait/1000)}s`);
+          logger.info?.(`[OpenCodePublicProxy] Egress rejected by inference screen proxy=${redact(url)} egress=${ip} status=403; cooldown=${Math.round(wait/1000)}s`);
           lastProgressAt=now();
           return;
         }
@@ -203,13 +209,13 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
           const wait=Math.min(120,Math.max(15,Number(screen.retryAfter)||60));
           entries.set(url,{url,egress:ip,checkedAt:now(),until:now()+wait*1000,failed:false,blocked:false,screenStatus:screen.status||screen.error||'unscreened',agent,inFlight:0,failures:previous?.failures||0,latency:now()-start,...paidFields(previous)});
           lastProgressAt=now();
-          logger.info?.(`[OpenCodePublicProxy] Egress admitted without a passing screen proxy=${url} egress=${ip} reason=${screen.status||screen.skipped||screen.error||'n/a'}; defer=${wait}s`);
+          logger.info?.(`[OpenCodePublicProxy] Egress admitted without a passing screen proxy=${redact(url)} egress=${ip} reason=${screen.status||screen.skipped||screen.error||'n/a'}; defer=${wait}s`);
           return;
         }
       }
       entries.set(url,{url,egress:ip,checkedAt:now(),until:previous?.until||0,failed:false,blocked:false,agent,inFlight:0,failures:0,latency:now()-start,...paidFields(previous)});
       lastProgressAt=now();
-      logger.info?.(`[OpenCodePublicProxy] Healthy proxy=${url} egress=${ip}`);
+      logger.info?.(`[OpenCodePublicProxy] Healthy proxy=${redact(url)} egress=${ip}`);
     }catch{
       if(previous){previous.failed=true;if(previous.agent===agent)previous.agent=null;}
       void agent.destroy();
@@ -234,6 +240,17 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
       // Re-stamp on every round: a hydrated entry from an earlier process must not lose its
       // paid status (and with it the higher concurrency and line budget).
       else{e.paid=p.slot;e.paidConcurrency=p.concurrency;e.paidLines=p.lines;}
+    }
+    // Once paid exits can carry every line, stop routing through free proxies: drop the bindings
+    // that are still pinned to a free egress so the next request re-binds to a paid exit.
+    if(config.paidDrainFree!==false){
+      const paidCapacity=usable().filter(e=>e.paid!=null).reduce((n,e)=>n+Math.max(1,Number(e.paidLines)||0),0);
+      const lineCount=(s.connections||[]).length;
+      if(lineCount>0&&paidCapacity>=lineCount){
+        let drained=0;
+        for(const [session,url] of [...assignments]){const e=entries.get(url);if(e&&e.paid==null){assignments.delete(session);drained++;}}
+        if(drained)logger.info?.(`[OpenCodePublicProxy] Paid exits can carry all ${lineCount} lines; re-binding ${drained} line(s) off the free pool`);
+      }
     }
     const gen=generation;const force=s.config.refreshNonce!==nonce;nonce=s.config.refreshNonce;
     if(!force&&now()-lastRound<config.replenishIntervalSeconds*1000)return;
@@ -484,13 +501,23 @@ function createPool(options){
   return {...pool,fetch:admission.fetch,snapshot:()=>admission.snapshot(pool.snapshot()),getUnavailable,canRoute:admission.canRoute,maintain:admission.maintain,tick(){pool.tick();void admission.maintain().catch(e=>(options.logger||console).warn?.('[OpenCodeAdmission] '+e.message));}};
 }
 
+// Session-cache read used by runtimeStorage. The cache is an optimisation: the per-connection
+// managed sessions are the fallback. A permissions error must therefore degrade, never throw,
+// or the whole proxy pool stops maintaining itself.
+function readSessionCache(dir){
+  try{return JSON.parse(fs.readFileSync(path.join(dir,'opencode-anonymous-sessions.json'),'utf8')).sessions||{};}
+  catch(e){
+    if(e.code!=='ENOENT')console.warn?.(`[OpenCodePublicProxy] session cache unreadable (${e.code||e.message}); falling back to per-connection managed sessions`);
+    return {};
+  }
+}
 function runtimeStorage(config){
   const req=require('node:module').createRequire(path.join(process.env.NINEROUTER_APP_ROOT||process.cwd(),'package.json'));let db;
   const database=()=>{if(!db){db=new (req('better-sqlite3'))(config.dbFile);db.pragma('busy_timeout=3000');}return db;};
   return {
     read(){
       const d=database(),data=JSON.parse(d.prepare('SELECT data FROM settings WHERE id=1').get()?.data||'{}');
-      let sessions={};try{sessions=JSON.parse(fs.readFileSync(path.join(process.env.DATA_DIR||'/app/data','opencode-anonymous-sessions.json'),'utf8')).sessions||{};}catch(e){if(e.code!=='ENOENT')throw e;}
+      let sessions=readSessionCache(process.env.DATA_DIR||'/app/data');
       const connections=d.prepare('SELECT id,name,data FROM providerConnections WHERE provider=? AND isActive=1').all('opencode').filter(r=>JSON.parse(r.data).providerSpecificData?.opencodePoolManaged===true).map(r=>({id:r.id,name:r.name,session:sessions[r.id]||(config.inferenceValidation&&data.opencodePublicProxy?.enabled?globalThis[Symbol.for('9router.opencodeAnonymous.v1')]?.getManagedSession({connectionId:r.id,providerSpecificData:{opencodePoolManaged:true}}):undefined)}));
       return {config:data.opencodePublicProxy||{},connections};
     },
@@ -510,7 +537,7 @@ function getProxyAgent(){
   }
   return require('node:module').createRequire(path.join(process.env.NINEROUTER_APP_ROOT||process.cwd(),'package.json'))('undici').ProxyAgent;
 }
-module.exports={publicIPv4,normalizeProxy,normalizePaidProxy,parseCandidates,mergeCandidates,createPool,createTransportPool,limitedText,getProxyAgent};
+module.exports={publicIPv4,normalizeProxy,normalizePaidProxy,parseCandidates,mergeCandidates,createPool,createTransportPool,limitedText,getProxyAgent,readSessionCache};
 if(process.env.NINEROUTER_OPENCODE_PUBLIC_PROXY==='1'&&!globalThis[MARK]){
   const config=JSON.parse(fs.readFileSync(path.join(__dirname,'opencode-public-proxy.json'),'utf8'));
   if(process.env.DATA_DIR)for(const key of ['dbFile','stateFile'])config[key]=config[key].replace(/^\/app\/data(?=\/|$)/,process.env.DATA_DIR);

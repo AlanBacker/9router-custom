@@ -49,6 +49,7 @@
   "paidEgressCount": 0,
   "maxPaidConcurrentPerEgress": 4,
   "maxPaidLinesPerEgress": 30,
+  "paidDrainFree": true,
   "inferenceRetrySeconds": 15,
   "inferenceRejectCooldownSeconds": 900,
   "inferenceHealthMaxAgeSeconds": 1800

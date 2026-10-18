@@ -56,7 +56,7 @@ function fixture(overrides={}){
     logger:{info(){},warn:m=>warns.push(String(m))},
     storage:{read:()=>({config:{enabled,targetCount:1,autoRecover429:true,probeModels:['test-free']},connections}),load:()=>saved,save:v=>{saved=v},status(){}}
   });
-  return {pool,warns,state:()=>saved,advance:ms=>{clock+=ms},blocked:()=>[...blockedIps]};
+  return {pool,warns,state:()=>saved,advance:ms=>{clock+=ms},blocked:()=>[...blockedIps],cfg:()=>cfg};
 }
 const paidUrls=state=>(state.entries||[]).filter(e=>/paid\.example/.test(e.url)).map(e=>e.url);
 
@@ -107,5 +107,21 @@ const paidUrls=state=>(state.entries||[]).filter(e=>/paid\.example/.test(e.url))
   assert(fileEntries.filter(u=>/user-session-[0-9a-f]+:pass@paid\.example/.test(u)).length===1,'the file template is minted');
   require('node:fs').unlinkSync(secret);
 
-  console.log('PASS: paid sticky-session slots are minted, preferred, capped, persisted across restart, re-minted to a new exit IP when refused, and configurable from the secret file.');
+  // Once a paid exit can carry the lines, lines pinned to the free pool are drained onto it.
+  const d = fixture({ config: { ...config, paidEgressTemplate: null, paidEgressCount: 0 } });
+  await d.pool.refresh();
+  const freeRes = await d.pool.fetch(inference, business('session0'));
+  await freeRes.text();
+  const before = d.pool.getBinding('session0')?.url || '';
+  assert(!/paid\.example/.test(before), 'line starts on the free pool: ' + before);
+  d.cfg().paidEgressTemplate = config.paidEgressTemplate;
+  d.cfg().paidEgressCount = 1;
+  d.advance(2000);
+  await d.pool.refresh();
+  const afterRes = await d.pool.fetch(inference, business('session0'));
+  await afterRes.text();
+  const after = d.pool.getBinding('session0')?.url || '';
+  assert(/paid\.example/.test(after), 'line was drained off the free pool onto paid: ' + after);
+
+  console.log('PASS: paid sticky-session slots are minted, preferred, capped, persisted across restart, re-minted to a new exit IP when refused, configurable from the secret file, and drain lines off the free pool.');
 })().catch(e=>{console.error(e);process.exitCode=1});
