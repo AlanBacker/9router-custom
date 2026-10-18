@@ -8,6 +8,9 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
   const maxPerMinute=config.inferenceProbesPerMinute||24,concurrency=config.inferenceConcurrency||2;
   const models=()=>{const c=storage.read().config||{};return [...new Set((Array.isArray(c.probeModels)?c.probeModels:config.probeModels||[]).filter(m=>typeof m==='string'&&/^[a-zA-Z0-9._-]{1,128}$/.test(m)))].slice(0,8);};
   const enabled=()=>storage.read().config?.enabled===true;
+  // The published snapshot (settings.opencodePublicProxyRuntime) is fetched by the dashboard every
+  // few seconds, so a bound proxy URL must never carry its credentials out of the process.
+  const redact=value=>String(value).replace(/\/\/[^/@\s]*@/g,'//***@');
   function state(session){let s=states.get(session);if(!s){s={passed:new Map(),requested:new Set(),nextAt:0,testing:false,reason:'等待真实推理验证'};states.set(session,s);}return s;}
   function ready(session,model){
     const s=states.get(session),b=pool.getBinding(session),p=s?.passed.get(model);
@@ -29,7 +32,7 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
     if(!enabled())return {...base,admissionEnabled:false};
     const connections=storage.read().connections||[],lines=connections.map(c=>{
       const s=state(c.session),b=pool.getBinding(c.session),required=targets(c.session),passed=required.filter(m=>ready(c.session,m));
-      return {name:c.name,proxyUrl:b?.url,egressIp:b?.egress,state:required.length&&passed.length===required.length?'ready':s.testing?'testing':s.nextAt>now()?'validation-cooldown':'pending',validatedModels:passed,requiredModels:required,lastValidationError:s.reason,nextValidationAt:s.nextAt||null};
+      return {name:c.name,proxyUrl:b?.url?redact(b.url):undefined,egressIp:b?.egress,state:required.length&&passed.length===required.length?'ready':s.testing?'testing':s.nextAt>now()?'validation-cooldown':'pending',validatedModels:passed,requiredModels:required,lastValidationError:s.reason,nextValidationAt:s.nextAt||null};
     });
     const readyCount=lines.filter(l=>l.state==='ready').length;
     const readyByModel=Object.fromEntries([...new Set(lines.flatMap(l=>l.requiredModels))].map(model=>[model,lines.filter(l=>l.validatedModels.includes(model)).length]));

@@ -73,9 +73,13 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
   }
   function snapshot(){
     const t=now(),connections=storage.read().connections||[],names=new Map(connections.map(c=>[c.session,c.name]));
-    const lines=[...assignments].map(([session,url])=>{const e=entries.get(url);return {name:names.get(session)||crypto.createHash('sha256').update(session).digest('hex').slice(0,8),proxyUrl:url,egressIp:e?.egress,state:e?.until>t?'cooldown':e?.inFlight?'busy':'ready'};});
+    const lines=[...assignments].map(([session,url])=>{const e=entries.get(url);return {name:names.get(session)||crypto.createHash('sha256').update(session).digest('hex').slice(0,8),proxyUrl:redact(url),egressIp:e?.egress,state:e?.until>t?'cooldown':e?.inFlight?'busy':'ready'};});
     for(const [session,issue]of sessionIssues)if(issue.until>t&&!assignments.has(session))lines.push({name:names.get(session)||'匿名线路',state:'auth-cooldown',until:issue.until,status:issue.status});
-    return {enabled,autoRecover429:recoveryEnabled,proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,healthy:usable().length,paidEgresses:usable().filter(e=>e.paid!=null).length,assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
+    // Per-slot detail for the dashboard. Never contains the proxy URL or credentials.
+    const perUrl=new Map();for(const u of assignments.values())perUrl.set(u,(perUrl.get(u)||0)+1);
+    const paidSlots=[...entries.values()].filter(e=>e.paid!=null).map(e=>({slot:e.paid,egress:e.egress||null,ok:!e.failed&&e.until<=t&&e.checkedAt>t-config.healthMaxAgeSeconds*1000,lines:perUrl.get(e.url)||0,concurrency:Number(e.paidConcurrency)||0,linesLimit:Number(e.paidLines)||0,rotations:paidSlotRotations.get(e.paid)||0}));
+    const paidHealthy=paidSlots.filter(e=>e.ok);
+    return {enabled,autoRecover429:recoveryEnabled,proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,healthy:usable().length,paidEgresses:paidHealthy.length,paidSlots,paidCapacity:paidHealthy.reduce((n,e)=>n+Math.max(1,e.linesLimit||1),0),paidAssigned:paidSlots.reduce((n,e)=>n+e.lines,0),assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
   }
   // ---- paid egresses ---------------------------------------------------------------------
   // Dedicated (usually residential) exits. Two forms:
@@ -86,15 +90,45 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
   // refused is re-minted with a fresh session id (a different exit IP) instead of being parked
   // for the full cooldown. Traffic is billed per GB upstream, so re-minting is free.
   const paidFile={sig:'',list:[],template:null,count:0};
-  let paidIds={};
-  const paidSlotRotatedAt=new Map();
-  function paidList(){
+  let paidIds={},paidMintNonce=null;
+  const paidSlotRotatedAt=new Map(),paidSlotRotations=new Map();
+  function paidList(dashboard){
     const list=[];
-    const push=(item,slot)=>{
+    const push=(item,slot,overrides)=>{
       const url=normalizePaidProxy(typeof item==='string'?item:item?.url);if(!url)return;
-      const meta=item&&typeof item==='object'?item:{};
+      const meta={...(item&&typeof item==='object'?item:{}),...(overrides||{})};
       list.push({slot,url,concurrency:Number(meta.concurrency)||Number(config.maxPaidConcurrentPerEgress)||4,lines:Number(meta.lines)||Number(config.maxPaidLinesPerEgress)||30});
     };
+    // Dashboard configuration (settings.opencodePaidEgress) is authoritative when present: the UI
+    // must be able to switch paid exits off, change the slot count, or re-mint fresh exit IPs
+    // without touching a file on the server. With no such key the file/config path below is used
+    // unchanged, so an install that predates the dashboard keeps working exactly as before.
+    if(dashboard&&typeof dashboard==='object'){
+      if(Number.isFinite(Number(dashboard.mintNonce))){
+        const nonce=Number(dashboard.mintNonce);
+        // "Give me new IPs" from the dashboard: any change to the nonce re-mints every slot. The
+        // last handled nonce is persisted with the rest of the state so a container restart does
+        // not quietly rotate every exit.
+        if(nonce!==paidMintNonce){
+          for(const slot of Object.keys(paidIds))paidIds[slot]=crypto.randomBytes(6).toString('hex');
+          logger.warn?.('[OpenCodePublicProxy] PAID exits: re-minting every slot to a fresh exit IP on request');
+        }
+        paidMintNonce=nonce;
+      }
+      if(dashboard.enabled===false)return list;
+      const bounds={};
+      if(Number(dashboard.concurrency)>0)bounds.concurrency=Number(dashboard.concurrency);
+      if(Number(dashboard.lines)>0)bounds.lines=Number(dashboard.lines);
+      const tpl=typeof dashboard.template==='string'&&dashboard.template.includes('{id}')?dashboard.template:null;
+      const count=tpl?Math.max(0,Math.min(64,Number(dashboard.count)||0)):0;
+      for(let i=0;i<count;i++){
+        const slot='slot'+i;
+        if(!paidIds[slot])paidIds[slot]=crypto.randomBytes(6).toString('hex');
+        push({url:tpl.replace(/\{id\}/g,paidIds[slot])},slot,bounds);
+      }
+      (Array.isArray(dashboard.egresses)?dashboard.egresses:[]).forEach((item,i)=>push(item,'list'+i,bounds));
+      return list;
+    }
     if(config.paidEgressFile){
       try{
         const stat=fs.statSync(config.paidEgressFile),sig=stat.mtimeMs+':'+stat.size;
@@ -123,7 +157,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
   function rotatePaidSlot(slot,why){
     if(!slot||!(slot in paidIds))return false;
     if(now()-(paidSlotRotatedAt.get(slot)||0)<60000)return false;
-    paidSlotRotatedAt.set(slot,now());paidIds[slot]=crypto.randomBytes(6).toString('hex');
+    paidSlotRotatedAt.set(slot,now());paidSlotRotations.set(slot,(paidSlotRotations.get(slot)||0)+1);paidIds[slot]=crypto.randomBytes(6).toString('hex');
     logger.warn?.(`[OpenCodePublicProxy] PAID egress slot=${slot} refused (${why||'blocked'}); re-minting a new exit IP`);
     publish(true);
     // Validate the fresh exit now instead of waiting for the next scheduled round; otherwise a
@@ -151,12 +185,12 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     if(!force&&now()-lastPersist<1000)return;
     lastPersist=now();try{
       storage.status(snapshot());
-      if(hydrated)storage.save({version:1,entries:[...entries.values()].map(({url,egress,checkedAt,until,failed,paid,paidConcurrency,paidLines})=>({url,egress,checkedAt,until,failed,paid,paidConcurrency,paidLines})),assignments:Object.fromEntries(assignments),sessionIssues:Object.fromEntries(sessionIssues),paidIds});
+      if(hydrated)storage.save({version:1,entries:[...entries.values()].map(({url,egress,checkedAt,until,failed,paid,paidConcurrency,paidLines})=>({url,egress,checkedAt,until,failed,paid,paidConcurrency,paidLines})),assignments:Object.fromEntries(assignments),sessionIssues:Object.fromEntries(sessionIssues),paidIds,paidMintNonce});
     }catch(e){logger.warn?.('[OpenCodePublicProxy] Status persistence failed: '+e.message);}
   }
   function hydrate(){
     if(hydrated)return;hydrated=true;
-    const saved=storage.load();if(saved?.paidIds&&typeof saved.paidIds==='object')paidIds={...saved.paidIds};
+    const saved=storage.load();if(saved?.paidIds&&typeof saved.paidIds==='object')paidIds={...saved.paidIds};if(saved?.paidMintNonce!=null&&Number.isFinite(Number(saved.paidMintNonce)))paidMintNonce=Number(saved.paidMintNonce);
     if(saved?.version!==1)return;
     for(const e of (saved.entries||[]).slice(0,config.maxCandidates||5000))if(normalizeProxy(e.url)&&publicIPv4(e.egress)){
       entries.set(e.url,{...e,agent:null,inFlight:0,failed:true});candidates.push(e.url);
@@ -238,7 +272,14 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     hydrate();
     // Paid exits are seeded (and re-seeded after a slot is re-minted) so they are always probed
     // first and stay validated; they are also exempt from the pool-size early exit below.
-    const paid=paidList();
+    const paid=paidList(s.paid);
+    // Slots that no longer exist (count reduced, or paid exits switched off in the dashboard) must
+    // not keep serving. A transient file-read failure yields no configuration at all, so it never
+    // triggers a prune. In-flight requests are left alone.
+    if(s.paid||paid.length){
+      const live=new Set(paid.map(p=>p.url));
+      for(const e of [...entries.values()])if(e.paid!=null&&!live.has(e.url)&&!e.inFlight){entries.delete(e.url);for(const [session,url]of[...assignments])if(url===e.url)assignments.delete(session);try{void e.agent?.destroy();}catch{}}
+    }
     for(const p of paid){
       const e=entries.get(p.url);
       if(!e)entries.set(p.url,{url:p.url,egress:null,checkedAt:0,until:0,failed:true,agent:null,inFlight:0,paid:p.slot,paidConcurrency:p.concurrency,paidLines:p.lines});
@@ -248,7 +289,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     }
     // Once paid exits can carry every line, stop routing through free proxies: drop the bindings
     // that are still pinned to a free egress so the next request re-binds to a paid exit.
-    if(config.paidDrainFree!==false){
+    if((s.paid?.drainFree??config.paidDrainFree)!==false){
       const paidCapacity=usable().filter(e=>e.paid!=null).reduce((n,e)=>n+Math.max(1,Number(e.paidLines)||0),0);
       const lineCount=(s.connections||[]).length;
       if(lineCount>0&&paidCapacity>=lineCount){
@@ -524,7 +565,7 @@ function runtimeStorage(config){
       const d=database(),data=JSON.parse(d.prepare('SELECT data FROM settings WHERE id=1').get()?.data||'{}');
       let sessions=readSessionCache(process.env.DATA_DIR||'/app/data');
       const connections=d.prepare('SELECT id,name,data FROM providerConnections WHERE provider=? AND isActive=1').all('opencode').filter(r=>JSON.parse(r.data).providerSpecificData?.opencodePoolManaged===true).map(r=>({id:r.id,name:r.name,session:sessions[r.id]||(config.inferenceValidation&&data.opencodePublicProxy?.enabled?globalThis[Symbol.for('9router.opencodeAnonymous.v1')]?.getManagedSession({connectionId:r.id,providerSpecificData:{opencodePoolManaged:true}}):undefined)}));
-      return {config:data.opencodePublicProxy||{},connections};
+      return {config:data.opencodePublicProxy||{},paid:data.opencodePaidEgress||null,connections};
     },
     status(value){database().prepare("UPDATE settings SET data=json_set(data,'$.opencodePublicProxyRuntime',json(?)) WHERE id=1").run(JSON.stringify(value));},
     load(){try{return JSON.parse(fs.readFileSync(config.stateFile,'utf8'));}catch(e){if(e.code==='ENOENT')return null;throw e;}},
