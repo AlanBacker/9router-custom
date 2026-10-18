@@ -125,7 +125,12 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     if(now()-(paidSlotRotatedAt.get(slot)||0)<60000)return false;
     paidSlotRotatedAt.set(slot,now());paidIds[slot]=crypto.randomBytes(6).toString('hex');
     logger.warn?.(`[OpenCodePublicProxy] PAID egress slot=${slot} refused (${why||'blocked'}); re-minting a new exit IP`);
-    publish(true);return true;
+    publish(true);
+    // Validate the fresh exit now instead of waiting for the next scheduled round; otherwise a
+    // banned exit leaves the pool short of paid capacity for up to replenishIntervalSeconds.
+    // refresh() coalesces concurrent calls, so a burst of refusals cannot stampede it.
+    try{void refresh().catch(()=>{});}catch{}
+    return true;
   }
   const paidFields=e=>e&&e.paid!=null?{paid:e.paid,paidConcurrency:e.paidConcurrency,paidLines:e.paidLines}:{};
   // Paid egress URLs carry user:password; never let credentials reach the logs.

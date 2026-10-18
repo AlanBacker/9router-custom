@@ -139,6 +139,9 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
           if(retry.ok)return retry;
           const detail=await retry.clone().json().catch(()=>undefined);
           void retry.body?.cancel().catch(()=>{});
+          // The retry also failed: this line has no working exit right now, so unlink it. Leaving
+          // the (now banned) exit bound would make the next request try the same dead exit first.
+          pool.rejectBinding(session,60000,false);
           s.passed.delete(model);s.reason=`业务请求 HTTP ${retry.status}，等待重新验证`;s.nextAt=now()+1000;pool.publish(true);
           return pool.handledError(retry,detail);
         }
