@@ -18,6 +18,21 @@ function normalizeProxy(value){
     return u.origin;
   }catch{return null;}
 }
+// Paid gateways are usually domains and always carry credentials, which normalizeProxy
+// deliberately rejects for public lists. Keep the free-list parser strict and add a relaxed
+// validator used only for egresses the operator pays for.
+function normalizePaidProxy(value){
+  try{
+    const u=new URL(/^https?:\/\//i.test(String(value))?String(value):'http://'+String(value));
+    if(!['http:','https:'].includes(u.protocol)||u.search||u.hash||(u.pathname&&u.pathname!=='/'))return null;
+    const host=u.hostname,kind=net.isIP(host);
+    if(kind===0&&!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(host))return null;
+    if(kind===4&&!publicIPv4(host))return null;
+    const port=u.port||(u.protocol==='https:'?'443':'80');
+    if(!/^\d+$/.test(port)||Number(port)<1||Number(port)>65535)return null;
+    return u.href.replace(/\/$/,'');
+  }catch{return null;}
+}
 function parseCandidates(text,limit=5000){
   const out=new Set();for(const line of String(text).split(/\r?\n/)){
     const raw=line.trim();if(!raw||raw.startsWith('#'))continue;
@@ -60,10 +75,53 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     const t=now(),connections=storage.read().connections||[],names=new Map(connections.map(c=>[c.session,c.name]));
     const lines=[...assignments].map(([session,url])=>{const e=entries.get(url);return {name:names.get(session)||crypto.createHash('sha256').update(session).digest('hex').slice(0,8),proxyUrl:url,egressIp:e?.egress,state:e?.until>t?'cooldown':e?.inFlight?'busy':'ready'};});
     for(const [session,issue]of sessionIssues)if(issue.until>t&&!assignments.has(session))lines.push({name:names.get(session)||'匿名线路',state:'auth-cooldown',until:issue.until,status:issue.status});
-    return {enabled,autoRecover429:recoveryEnabled,proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,healthy:usable().length,assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
+    return {enabled,autoRecover429:recoveryEnabled,proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,healthy:usable().length,paidEgresses:usable().filter(e=>e.paid!=null).length,assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
   }
+  // ---- paid egresses ---------------------------------------------------------------------
+  // Dedicated (usually residential) exits. Two forms:
+  //   * a static list (config.paidEgressUrls, or a JSON file that is never committed to git);
+  //   * sticky-session slots minted from config.paidEgressTemplate, e.g.
+  //     "http://user-session-{id}:pass@gateway:port" with config.paidEgressCount slots.
+  // Paid egresses are preferred over the free pool, carry more concurrency, and a slot that is
+  // refused is re-minted with a fresh session id (a different exit IP) instead of being parked
+  // for the full cooldown. Traffic is billed per GB upstream, so re-minting is free.
+  const paidFile={sig:'',list:[]};
+  let paidIds={};
+  const paidSlotRotatedAt=new Map();
+  function paidList(){
+    const list=[];
+    const push=(item,slot)=>{
+      const url=normalizePaidProxy(typeof item==='string'?item:item?.url);if(!url)return;
+      const meta=item&&typeof item==='object'?item:{};
+      list.push({slot,url,concurrency:Number(meta.concurrency)||Number(config.maxPaidConcurrentPerEgress)||4,lines:Number(meta.lines)||Number(config.maxPaidLinesPerEgress)||30});
+    };
+    if(config.paidEgressFile){
+      try{
+        const stat=fs.statSync(config.paidEgressFile),sig=stat.mtimeMs+':'+stat.size;
+        if(paidFile.sig!==sig){
+          const raw=JSON.parse(fs.readFileSync(config.paidEgressFile,'utf8'));
+          paidFile.sig=sig;paidFile.list=Array.isArray(raw)?raw:(Array.isArray(raw?.egresses)?raw.egresses:[]);
+        }
+        paidFile.list.forEach((item,i)=>push(item,'file'+i));
+      }catch{paidFile.sig='';paidFile.list=[];}
+    }
+    (Array.isArray(config.paidEgressUrls)?config.paidEgressUrls:[]).forEach((item,i)=>push(item,'cfg'+i));
+    const template=typeof config.paidEgressTemplate==='string'&&config.paidEgressTemplate.includes('{id}')?config.paidEgressTemplate:null;
+    const count=template?Math.max(0,Math.min(64,Number(config.paidEgressCount)||0)):0;
+    for(let i=0;i<count;i++){const slot='slot'+i;if(!paidIds[slot])paidIds[slot]=crypto.randomBytes(6).toString('hex');push({url:template.replace(/\{id\}/g,paidIds[slot])},slot);}
+    return list;
+  }
+  // Only template slots can be re-minted; a bought static IP is rotated by the operator.
+  function rotatePaidSlot(slot,why){
+    if(!slot||!(slot in paidIds))return false;
+    if(now()-(paidSlotRotatedAt.get(slot)||0)<60000)return false;
+    paidSlotRotatedAt.set(slot,now());paidIds[slot]=crypto.randomBytes(6).toString('hex');
+    logger.warn?.(`[OpenCodePublicProxy] PAID egress slot=${slot} refused (${why||'blocked'}); re-minting a new exit IP`);
+    publish(true);return true;
+  }
+  const paidFields=e=>e&&e.paid!=null?{paid:e.paid,paidConcurrency:e.paidConcurrency,paidLines:e.paidLines}:{};
   function usable(){return [...entries.values()].filter(e=>e.checkedAt>now()-config.healthMaxAgeSeconds*1000&&e.until<=now()&&!e.failed);}
-  function capacity(e){return Math.max(1,Number(config.maxConcurrentPerEgress)||3);}
+  function capacity(e){const n=e&&e.paidConcurrency?e.paidConcurrency:config.maxConcurrentPerEgress;return Math.max(1,Number(n)||3);}
   // Track every egress that recently failed for a line so its retry lands on a different one
   // (per-line failover). Global quarantine is reserved for repeated/deny outcomes, not one blip.
   function failedRecently(session){const r=recentFailures.get(session);if(!r)return [];const cut=now()-(config.egressRetryAvoidMs||120000);for(const [egress,at]of r)if(at<cut)r.delete(egress);if(!r.size){recentFailures.delete(session);return [];}return [...r.keys()];}
@@ -78,12 +136,13 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     if(!force&&now()-lastPersist<1000)return;
     lastPersist=now();try{
       storage.status(snapshot());
-      if(hydrated)storage.save({version:1,entries:[...entries.values()].map(({url,egress,checkedAt,until,failed})=>({url,egress,checkedAt,until,failed})),assignments:Object.fromEntries(assignments),sessionIssues:Object.fromEntries(sessionIssues)});
+      if(hydrated)storage.save({version:1,entries:[...entries.values()].map(({url,egress,checkedAt,until,failed,paid,paidConcurrency,paidLines})=>({url,egress,checkedAt,until,failed,paid,paidConcurrency,paidLines})),assignments:Object.fromEntries(assignments),sessionIssues:Object.fromEntries(sessionIssues),paidIds});
     }catch(e){logger.warn?.('[OpenCodePublicProxy] Status persistence failed: '+e.message);}
   }
   function hydrate(){
     if(hydrated)return;hydrated=true;
-    const saved=storage.load();if(saved?.version!==1)return;
+    const saved=storage.load();if(saved?.paidIds&&typeof saved.paidIds==='object')paidIds={...saved.paidIds};
+    if(saved?.version!==1)return;
     for(const e of (saved.entries||[]).slice(0,config.maxCandidates||5000))if(normalizeProxy(e.url)&&publicIPv4(e.egress)){
       entries.set(e.url,{...e,agent:null,inFlight:0,failed:true});candidates.push(e.url);
     }
@@ -99,7 +158,8 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
   function egressCooldownMs(delay){return Math.min(Math.max(1000,Number(config.maxEgressCooldownMs)||1800000),Math.max(1000,delay));}
   // A shared egress must not be quarantined by a single transient gateway error; only repeated
   // failures (or an explicit 403/429) cool it. Counter resets on any successful response.
-  function penalize(entry,delay,hard){
+  function penalize(entry,delay,hard,reason){
+    if(hard&&reason==='access')rotatePaidSlot(entry.paid,reason);
     if(hard){entry.until=Math.max(entry.until||0,now()+egressCooldownMs(delay));entry.failures=0;return;}
     entry.failures=(entry.failures||0)+1;
     if(entry.failures>=Math.max(1,Number(config.egressFailureThreshold)||3)){entry.until=Math.max(entry.until||0,now()+egressCooldownMs(delay));entry.failures=0;}
@@ -112,14 +172,14 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
       if(!check.ok)throw new Error('IP check failed');
       const ip=JSON.parse(await limitedText(check,4096)).ip;
       if(!publicIPv4(ip)||ip===baseline)throw new Error('Egress unchanged or non-public');
-      if([...entries.values()].some(e=>e.url!==url&&e.egress===ip&&!e.failed&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000))throw new Error('Duplicate egress');
+      if(!previous?.paid&&[...entries.values()].some(e=>e.url!==url&&e.egress===ip&&!e.failed&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000))throw new Error('Duplicate egress');
       const target=await nativeFetch(config.targetCheckUrl,{dispatcher:agent,redirect:'error',signal:AbortSignal.timeout(config.probeTimeoutMs)});
       if(!target.ok)throw new Error('OpenCode unreachable');
       const models=JSON.parse(await limitedText(target,512*1024));
       if(!Array.isArray(models.data)&&!Array.isArray(models.models)&&!Array.isArray(models))throw new Error('Unexpected model response');
       if(!enabled||gen!==generation)throw new Error('Disabled while checking');
       // Recheck after async probes so equal egresses cannot race into the pool.
-      if([...entries.values()].some(e=>e.url!==url&&e.egress===ip&&!e.failed&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000))throw new Error('Duplicate egress');
+      if(!previous?.paid&&[...entries.values()].some(e=>e.url!==url&&e.egress===ip&&!e.failed&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000))throw new Error('Duplicate egress');
       // Connectivity alone is not enough: some egress IPs are rejected by the free-tier anti-abuse gate.
       // Screen with a real (tiny) inference before the proxy is ever handed to an account.
       // The screen is advisory: only a definite 403 (egress IP refused) quarantines a proxy. A throttled
@@ -128,7 +188,8 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
         const screen=await screenEgress(url,agent);
         if(screen.status===403){
           const wait=screenCooldown();
-          entries.set(url,{url,egress:ip,checkedAt:now(),until:now()+wait,failed:true,blocked:true,screenStatus:403,agent:null,inFlight:0,latency:now()-start});
+          if(rotatePaidSlot(previous?.paid,'screen-403')){entries.delete(url);void agent.destroy();lastProgressAt=now();return;}
+          entries.set(url,{url,egress:ip,checkedAt:now(),until:now()+wait,failed:true,blocked:true,screenStatus:403,agent:null,inFlight:0,latency:now()-start,...paidFields(previous)});
           void agent.destroy();
           logger.info?.(`[OpenCodePublicProxy] Egress rejected by inference screen proxy=${url} egress=${ip} status=403; cooldown=${Math.round(wait/1000)}s`);
           lastProgressAt=now();
@@ -136,13 +197,13 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
         }
         if(!screen.ok){
           const wait=Math.min(120,Math.max(15,Number(screen.retryAfter)||60));
-          entries.set(url,{url,egress:ip,checkedAt:now(),until:now()+wait*1000,failed:false,blocked:false,screenStatus:screen.status||screen.error||'unscreened',agent,inFlight:0,failures:previous?.failures||0,latency:now()-start});
+          entries.set(url,{url,egress:ip,checkedAt:now(),until:now()+wait*1000,failed:false,blocked:false,screenStatus:screen.status||screen.error||'unscreened',agent,inFlight:0,failures:previous?.failures||0,latency:now()-start,...paidFields(previous)});
           lastProgressAt=now();
           logger.info?.(`[OpenCodePublicProxy] Egress admitted without a passing screen proxy=${url} egress=${ip} reason=${screen.status||screen.skipped||screen.error||'n/a'}; defer=${wait}s`);
           return;
         }
       }
-      entries.set(url,{url,egress:ip,checkedAt:now(),until:previous?.until||0,failed:false,blocked:false,agent,inFlight:0,failures:0,latency:now()-start});
+      entries.set(url,{url,egress:ip,checkedAt:now(),until:previous?.until||0,failed:false,blocked:false,agent,inFlight:0,failures:0,latency:now()-start,...paidFields(previous)});
       lastProgressAt=now();
       logger.info?.(`[OpenCodePublicProxy] Healthy proxy=${url} egress=${ip}`);
     }catch{
@@ -159,7 +220,18 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
       logger.warn?.(`[OpenCodePublicProxy] Maintenance round stalled ${Math.round(age/1000)}s (limit ${Math.round(roundTimeoutMs()/1000)}s); abandoning it so later ticks can proceed`);
       roundAbandons++;round=null;generation++;heat();
     }
-    hydrate();const gen=generation;const force=s.config.refreshNonce!==nonce;nonce=s.config.refreshNonce;
+    hydrate();
+    // Paid exits are seeded (and re-seeded after a slot is re-minted) so they are always probed
+    // first and stay validated; they are also exempt from the pool-size early exit below.
+    const paid=paidList();
+    for(const p of paid){
+      const e=entries.get(p.url);
+      if(!e)entries.set(p.url,{url:p.url,egress:null,checkedAt:0,until:0,failed:true,agent:null,inFlight:0,paid:p.slot,paidConcurrency:p.concurrency,paidLines:p.lines});
+      // Re-stamp on every round: a hydrated entry from an earlier process must not lose its
+      // paid status (and with it the higher concurrency and line budget).
+      else{e.paid=p.slot;e.paidConcurrency=p.concurrency;e.paidLines=p.lines;}
+    }
+    const gen=generation;const force=s.config.refreshNonce!==nonce;nonce=s.config.refreshNonce;
     if(!force&&now()-lastRound<config.replenishIntervalSeconds*1000)return;
     lastRound=now();
     const token=++roundToken;roundStartedAt=now();lastProgressAt=now();
@@ -183,12 +255,15 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
         lastProgressAt=now();
         // Revalidate known exits first after restart or failure; do not bury them in a shuffled public list.
         const due=[...entries.values()].filter(e=>!e.inFlight&&e.until<=now()&&(e.failed||e.checkedAt<=now()-config.healthMaxAgeSeconds*1000)).map(e=>e.url);
-        const pending=[...new Set([...due,...candidates])];
+        const pending=[...new Set([...paid.map(p=>p.url),...due,...candidates])];
         const queue=pending.splice(0,config.maxCandidatesPerRound);candidates=pending;
+        // A paid exit that is not yet validated must not be skipped just because the free pool
+        // already satisfies the target; its validation is the whole point of paying for it.
+        const paidPending=()=>paid.some(p=>{const e=entries.get(p.url);return !e||e.failed||e.checkedAt<=now()-config.healthMaxAgeSeconds*1000;});
         let index=0;
         await Promise.all(Array.from({length:config.probeConcurrency},async()=>{
           while(enabled&&gen===generation&&index<queue.length){
-            if(usable().length>=desired)break;
+            if(usable().length>=desired&&!paidPending())break;
             const url=queue[index++];const e=entries.get(url);
             if(e&&!e.failed&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000)continue;
             await guard(probe(url,gen),Math.max(15000,(config.probeTimeoutMs||6000)*4),'probe '+url);lastProgressAt=now();
@@ -238,16 +313,20 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     // egress may serve several anonymous sessions (upstream rate limits are per session,
     // not per egress), unless sharing is explicitly disabled.
     const maxLines=Math.max(1,Number(config.maxLinesPerEgress)||12);
+    const maxLinesFor=e=>e&&e.paidLines?Math.max(1,Number(e.paidLines)):maxLines;
     const linesOn=url=>{let n=0;for(const u of assignments.values())if(u===url)n++;return n;};
     const alternative=(exclude,respectCapacity=true)=>{
       const excludes=new Set(Array.isArray(exclude)?exclude:exclude?[exclude]:[]);
       const occupied=new Set([...assignments.values()]);
       const pool=usable().filter(e=>!excludes.has(e.egress)&&(!respectCapacity||e.inFlight<capacity(e))).sort((a,b)=>((a.inFlight?1:0)-(b.inFlight?1:0))||((a.latency||0)-(b.latency||0)));
-      const exclusive=pool.find(e=>!occupied.has(e.url)&&linesOn(e.url)<maxLines);
-      if(exclusive)return exclusive;
-      if(config.allowProxySharing===false)return undefined;
-      // Never pile more lines onto an egress than it can reasonably carry.
-      return pool.find(e=>linesOn(e.url)<maxLines);
+      const good=e=>linesOn(e.url)<maxLinesFor(e);
+      const paid=pool.filter(e=>e.paid!=null),free=pool.filter(e=>e.paid==null);
+      const exclusive=list=>list.find(e=>!occupied.has(e.url)&&good(e));
+      const shared=list=>config.allowProxySharing===false?undefined:list.find(good);
+      // Paid exits take precedence: a paid exit no other line holds, then any paid exit with room,
+      // and only then the free pool. With no paid exit configured this is exactly the old order;
+      // with sharing disabled only an egress no other line holds may be handed out.
+      return exclusive(paid)||shared(paid)||exclusive(free)||shared(free);
     };
     for(let attempt=0;attempt<(recovery?2:1);attempt++){
       let entry=entries.get(assignments.get(session));
@@ -278,7 +357,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
         if(['rate','access','gateway'].includes(issue.kind)){
           const retry=response.headers.get('retry-after'),number=Number(retry);
           const delay=retry&&Number.isFinite(number)?number*1000:retry?Date.parse(retry)-now():issue.kind==='access'?300000:60000;
-          penalize(entry,Number.isFinite(delay)?delay:60000,issue.kind!=='gateway');
+          penalize(entry,Number.isFinite(delay)?delay:60000,issue.kind!=='gateway',issue.kind);
           noteFailure(session,entry.egress);
         }
         const canRecover=recovery&&attempt===0&&!init.signal?.aborted&&shouldStop429Fallback();
@@ -324,7 +403,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
   function tick(){try{settings();if(enabled)void refresh();else publish();}catch(e){logger.warn?.('[OpenCodePublicProxy] Settings unavailable: '+e.message);}}
   function getBinding(session){return entries.get(assignments.get(session));}
   function bindingValid(session){const e=getBinding(session);return !!(e&&!e.failed&&e.until<=now()&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000);}
-  function rejectBinding(session,delay,hard=true){const e=getBinding(session);if(e){penalize(e,delay,hard);noteFailure(session,e.egress);}assignments.delete(session);publish(true);}
+  function rejectBinding(session,delay,hard=true,reason){const e=getBinding(session);if(e){penalize(e,delay,hard,reason);noteFailure(session,e.egress);}assignments.delete(session);publish(true);}
   function sessionBusy(session){return inFlightSessions.has(session);}
   function canAcquire(session){
     if(sessionBusy(session))return false;
@@ -427,7 +506,7 @@ function getProxyAgent(){
   }
   return require('node:module').createRequire(path.join(process.env.NINEROUTER_APP_ROOT||process.cwd(),'package.json'))('undici').ProxyAgent;
 }
-module.exports={publicIPv4,normalizeProxy,parseCandidates,mergeCandidates,createPool,createTransportPool,limitedText,getProxyAgent};
+module.exports={publicIPv4,normalizeProxy,normalizePaidProxy,parseCandidates,mergeCandidates,createPool,createTransportPool,limitedText,getProxyAgent};
 if(process.env.NINEROUTER_OPENCODE_PUBLIC_PROXY==='1'&&!globalThis[MARK]){
   const config=JSON.parse(fs.readFileSync(path.join(__dirname,'opencode-public-proxy.json'),'utf8'));
   if(process.env.DATA_DIR)for(const key of ['dbFile','stateFile'])config[key]=config[key].replace(/^\/app\/data(?=\/|$)/,process.env.DATA_DIR);

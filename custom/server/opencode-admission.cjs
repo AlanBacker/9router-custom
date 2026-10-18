@@ -65,7 +65,7 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
         if(['auth','session','endpoint','other'].includes(issue.kind)||[400,404,422].includes(result.status)){
           const seconds=Number(result.retryAfter),date=Date.parse(result.retryAfter||'');s.nextAt=now()+(Number.isFinite(seconds)&&seconds>0?Math.min(seconds,86400)*1000:Number.isFinite(date)&&date>now()?Math.min(date-now(),86400000):30000);if(issue.kind==='endpoint')modelPauses.set(model,s.nextAt);return;
         }
-        pool.rejectBinding(session,result.status===403?(config.inferenceRejectCooldownSeconds||1800)*1000:60000,result.status===403);
+        pool.rejectBinding(session,result.status===403?(config.inferenceRejectCooldownSeconds||1800)*1000:60000,result.status===403,result.status===403?'access':undefined);
         // Only the failing model loses its pass; other models on this line keep theirs.
         s.passed.delete(model);pool.publish(true);
       }
@@ -130,7 +130,7 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
       const firstKind=response.ok?'ok':classifyFailure(response.status,firstDetail).kind;
       const spareBudget=used<maxPerMinute;
       if(spareBudget&&(firstKind==='access'||firstKind==='gateway')&&firstDetail?.error?.type!=='OpenCodePublicProxyUnavailable'){
-        pool.rejectBinding(session,firstKind==='access'?(config.inferenceRejectCooldownSeconds||1800)*1000:60000,firstKind==='access');
+        pool.rejectBinding(session,firstKind==='access'?(config.inferenceRejectCooldownSeconds||1800)*1000:60000,firstKind==='access',firstKind);
         void response.body?.cancel().catch(()=>{});
         const connection=(storage.read().connections||[]).find(c=>c.session===session);
         if(connection)await validate(connection,targets(session)).catch(()=>{});

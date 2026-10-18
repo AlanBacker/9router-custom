@@ -44,6 +44,11 @@
   "inferenceAttemptsPerLine": 3,
   "admissionWaitMs": 10000,
   "admissionShortWaitMs": 3000,
+  "paidEgressFile": "/opt/9router-hotfix/opencode-paid-egress.json",
+  "paidEgressTemplate": null,
+  "paidEgressCount": 0,
+  "maxPaidConcurrentPerEgress": 4,
+  "maxPaidLinesPerEgress": 30,
   "inferenceRetrySeconds": 15,
   "inferenceRejectCooldownSeconds": 900,
   "inferenceHealthMaxAgeSeconds": 1800
