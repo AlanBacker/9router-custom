@@ -203,6 +203,9 @@
           });
           if (remint) config.mintNonce = Date.now();
           await saveConfig(win.fetch.bind(win), config);
+          // Keep the cached config in step with what was just stored: a stale mintNonce would make
+          // the next plain "save" look like a fresh re-mint request and rotate every exit again.
+          panel._config = config;
           form.elements.password.value = '';
           status.textContent = remint
             ? '已保存，正在为每个出口申请新 IP（约 20 秒后完成验证）。'
