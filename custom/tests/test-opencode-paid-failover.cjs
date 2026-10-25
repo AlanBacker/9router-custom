@@ -35,12 +35,18 @@ function fixture({ banPaidBudget = 0 } = {}) {
   const warns = [], banned = new Set();
   const counters = { business403: 0, screens: 0, bans: 0 };
   const freeIps = { 'http://8.8.8.8:3128': '9.9.9.9', 'http://1.1.1.1:8080': '149.112.112.112' };
+  const paidIps = new Map();
   const ipOf = url => {
     const u = String(url || '');
     if (u.includes('8.8.8.8:3128')) return '9.9.9.9';
     if (u.includes('1.1.1.1:8080')) return '149.112.112.112';
     const m = /session-([0-9a-f]+)/.exec(u);
-    return m ? '45.33.1.' + (parseInt(m[1].slice(0, 2), 16) % 200 + 10) : '4.2.2.2';
+    if (!m) return '4.2.2.2';
+    // Every minted slot needs its own exit IP. Deriving the octet from two hex characters made
+    // collisions possible (~0.5%), and a collision makes a banned IP take the spare slot with it.
+    let ip = paidIps.get(m[1]);
+    if (!ip) { ip = '45.33.1.' + (10 + paidIps.size); paidIps.set(m[1], ip); }
+    return ip;
   };
   const nativeFetch = async (u, init = {}) => {
     const url = init.dispatcher?.url;
@@ -88,7 +94,7 @@ function fixture({ banPaidBudget = 0 } = {}) {
 
   const bound = a.pool.getBinding('session0');
   assert(bound, 'the line is still bound after failover');
-  assert(bound.paid != null, 'the line is still on a paid exit, not degraded to the free pool');
+  assert(bound.paid != null, 'the line is still on a paid exit, not degraded to the free pool (egress=' + bound.egress + ', banned=' + JSON.stringify(a.banned()) + ', paidSlots=' + JSON.stringify(a.pool.snapshot().paidSlots.map(s => s.slot + ':' + s.egress + ':' + s.ok)) + ', recent=' + JSON.stringify(a.warns.slice(-4)) + ')');
   assert.notEqual(bound.egress, a.banned()[0], 'the line no longer uses the banned IP');
 
   const later = await a.pool.fetch(inference, business('session0'));
