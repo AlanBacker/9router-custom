@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-// Narrow hotfix for 9Router's legacy DeepSeek effort normalization.
+// Narrow hotfix for 9Router's DeepSeek effort normalization.
 // Changes only deepseek-v4.1-flash-free with an explicit low effort.
 const MARK = '9R_DS41_LOW_V1';
 
@@ -16,13 +16,6 @@ function transform(code) {
     const next = /\b(?:case\s*["'][^"']*["']\s*:|default\s*:)/.exec(tail);
     const branch = next ? tail.slice(0, next.index) : tail;
     if (branch.includes(MARK)) continue;
-    const mapping = /(?:([A-Za-z_$][\w$]*)\s*===\s*["']xhigh["']|["']xhigh["']\s*===\s*([A-Za-z_$][\w$]*))\s*\|\|\s*(?:([A-Za-z_$][\w$]*)\s*===\s*["']max["']|["']max["']\s*===\s*([A-Za-z_$][\w$]*))\s*\?\s*["']max["']\s*:\s*["']high["']/g;
-    const hits = [...branch.matchAll(mapping)];
-    if (!hits.length) continue;
-    if (hits.length !== 1) throw new Error('Ambiguous DeepSeek mapping; no changes made.');
-    const hit = hits[0];
-    const level = hit[1] || hit[2];
-    if (level !== (hit[3] || hit[4])) throw new Error('Unexpected effort expression.');
     const funcs = [...code.slice(0, b.index).matchAll(/\bfunction(?:\s+[A-Za-z_$][\w$]*)?\s*\(([^)]*)\)\s*\{/g)];
     const params = funcs.at(-1)?.[1].split(',').map(s => s.trim());
     const body = params?.[1];
@@ -33,7 +26,30 @@ function transform(code) {
       }
     }
     const modelCheck = '/(?:^|\\/)deepseek-v4\\.1-flash-free(?:\\([^()]*\\))?$/.test(String(' + body + '.model||""))';
-    const replacement = '/*' + MARK + '*/(' + level + '==="low"&&' + modelCheck + '?"low":(' + hit[0] + '))';
+    const guard = level => level + ' === "low" && ' + modelCheck;
+
+    // Current layout: "const want = <ternary>;" spanning several lines.
+    const assigned = /\bconst\s+want\s*=\s*([\s\S]*?);/.exec(branch);
+    if (assigned) {
+      if (!/supportedLevels\?\.includes\(["']low["']\)/.test(assigned[1])) {
+        throw new Error('The deepseek effort mapping changed shape; review the 9R_DS41_LOW_V1 hotfix.');
+      }
+      const level = /^\s*([A-Za-z_$][\w$]*)\s*===\s*["']xhigh["']/.exec(assigned[1])?.[1];
+      if (!level) throw new Error('Unexpected effort expression.');
+      const replacement = 'const want = /*' + MARK + '*/(' + guard(level) + ' ? "low" : (' + assigned[1].trim() + '));';
+      edits.push({ index: start + assigned.index, old: assigned[0], replacement });
+      continue;
+    }
+
+    // Legacy layout: a single ternary ending in ? "max" : "high".
+    const mapping = /(?:([A-Za-z_$][\w$]*)\s*===\s*["']xhigh["']|["']xhigh["']\s*===\s*([A-Za-z_$][\w$]*))\s*\|\|\s*(?:([A-Za-z_$][\w$]*)\s*===\s*["']max["']|["']max["']\s*===\s*([A-Za-z_$][\w$]*))\s*\?\s*["']max["']\s*:\s*["']high["']/g;
+    const hits = [...branch.matchAll(mapping)];
+    if (!hits.length) continue;
+    if (hits.length !== 1) throw new Error('Ambiguous DeepSeek mapping; no changes made.');
+    const hit = hits[0];
+    const level = hit[1] || hit[2];
+    if (level !== (hit[3] || hit[4])) throw new Error('Unexpected effort expression.');
+    const replacement = '/*' + MARK + '*/(' + guard(level) + ' ? "low" : (' + hit[0] + '))';
     edits.push({ index: start + hit.index, old: hit[0], replacement });
   }
   for (const e of edits.sort((a, b) => b.index - a.index)) {

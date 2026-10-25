@@ -7,7 +7,9 @@ const source = `function applyFormat(fmt, body, cfg, caps, supportedLevels, disp
  case "deepseek": {
    body.thinking = {type:"enabled"};
    const level = eff.level;
-   const want = level === "xhigh" || level === "max" ? "max" : "high";
+   const want = level === "xhigh" || level === "max" ? "max"
+     : (level === "low" || level === "minimal") && supportedLevels?.includes("low") ? "low"
+     : "high";
    body.reasoning_effort = want === "max" && supportedLevels && !supportedLevels.includes("max") ? "high" : want;
    break;
  }
@@ -23,15 +25,26 @@ for (const code of [source, minified]) {
  for (const model of ['deepseek-v4.1-flash-free','oc/deepseek-v4.1-flash-free(low)','opencode/deepseek-v4.1-flash-free']) {
    for (const [level, expected] of [['low','low'],['medium','high'],['high','high'],['xhigh','max'],['max','max']]) {
      assert.equal(fn('deepseek',{model},{level},null,['low','high','max']).reasoning_effort, expected);
+     // deepseek's declared levels are none|high|max: upstream alone folds low away, the hotfix keeps it.
+     assert.equal(fn('deepseek',{model},{level},null,['high','max']).reasoning_effort, level==='low' ? 'low' : expected);
    }
  }
  for (const model of ['deepseek-v4-flash','deepseek-v4.1-flash','deepseek-v3.2','deepseek-v4.1-flash-free(low)(low)']) {
-   assert.equal(fn('deepseek',{model},{level:'low'},null,['high','max']).reasoning_effort,'high');
+   for (const supported of [['high','max'],['low','high','max']]) {
+     // The legacy minified layout predates upstream's supported-levels handling.
+     const expected = code === source && supported.includes('low') ? 'low' : 'high';
+     assert.equal(fn('deepseek',{model},{level:'low'},null,supported).reasoning_effort, expected);
+   }
  }
  assert.equal(fn('zai',{model:'glm-5.3-flash-free'},{level:'low'},null,null).reasoning_effort,'low');
  assert.equal(transform(result.code).count,0);
 }
 assert.equal(transform('function f() { return 1; }').count,0);
 assert.throws(() => transform('case "deepseek": const want = level === "xhigh" || level === "max" ? "max" : "high"; body.reasoning_effort = want;'));
+assert.throws(() => transform(`function f(a, body, c, d, supportedLevels) { switch (a) { case "deepseek": body.thinking = 1; body.reasoning_effort = 1; const want = level === "xhigh" ? "max" : "high"; } }`), /changed shape/);
 
-const fs=require('node:fs');const actual=fs.readFileSync('open-sse/translator/concerns/thinkingUnified.js','utf8');const start=actual.indexOf('function applyFormat('),end=actual.indexOf('export function applyThinking(');const native=vm.runInNewContext(actual.slice(start,end)+';applyFormat',{toLevel:c=>c.level,CUSTOM_EXPLICIT_LOW_MODEL:/(?:^|\/)deepseek-v4\.1-flash-free(?:\([^()]*\))?$/});const body={model:'deepseek-v4.1-flash-free'};native('deepseek',body,{mode:'level',level:'low'},{},['low','high','max']);assert.equal(body.reasoning_effort,'low');console.log('PASS: native thinking source and bounded compatibility transforms.');
+const fs=require('node:fs');const actual=fs.readFileSync('open-sse/translator/concerns/thinkingUnified.js','utf8');const start=actual.indexOf('function applyFormat('),end=actual.indexOf('export function applyThinking(');const native=vm.runInNewContext(actual.slice(start,end)+';applyFormat',{toLevel:c=>c.level,CUSTOM_EXPLICIT_LOW_MODEL:/(?:^|\/)deepseek-v4\.1-flash-free(?:\([^()]*\))?$/});
+const body={model:'deepseek-v4.1-flash-free'};native('deepseek',body,{mode:'level',level:'low'},{},['low','high','max']);assert.equal(body.reasoning_effort,'low');
+const declared={model:'deepseek-v4.1-flash-free'};native('deepseek',declared,{mode:'level',level:'low'},{},['high','max']);assert.equal(declared.reasoning_effort,'low');
+const other={model:'deepseek-v4-flash'};native('deepseek',other,{mode:'level',level:'low'},{},['high','max']);assert.equal(other.reasoning_effort,'high');
+console.log('PASS: native thinking source and bounded compatibility transforms.');
