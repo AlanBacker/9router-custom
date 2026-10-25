@@ -79,4 +79,9 @@ jobs:
         run: git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push --atomic origin HEAD:refs/heads/main "$UPSTREAM_SHA:refs/heads/upstream"
       - name: Report no source changes
         if: steps.source.outputs.changed != 'true'
-        run: echo 'Official source and customized tree are unchanged. No rebuild or publication needed.' >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          if [ "${{ steps.source.outputs.conflict }}" = "true" ]; then
+            echo 'Upstream merge conflict: kept the current source and image; resolve it locally to resume synchronization.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Official source and customized tree are unchanged. No rebuild or publication needed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
