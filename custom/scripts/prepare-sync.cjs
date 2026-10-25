@@ -31,7 +31,7 @@ function main(){
  const image='ghcr.io/'+repository.toLowerCase();
  if(conflict){
   const text='Upstream merge conflict ('+conflict+'). Keeping the currently verified source and image; resolve it locally to resume synchronization.';
-  console.log('::warning::'+text);
+  console.error('::warning::'+text);
   if(process.env.GITHUB_STEP_SUMMARY)fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,'### Upstream sync skipped\n\n'+text+'\n');
   writeOutput({changed:false,conflict:true,baseHead,sourceSha,revision:baseHead,image});
   return;
