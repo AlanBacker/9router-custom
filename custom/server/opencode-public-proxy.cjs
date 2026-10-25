@@ -54,7 +54,7 @@ async function limitedText(response,maxBytes){
   finally{void reader.cancel().catch(()=>{});}
 }
 function createTransportPool({nativeFetch,makeAgent,storage,config,logger=console,now=Date.now,screenEgress=null,renewSession=(old,reason)=>globalThis[Symbol.for('9router.opencodeAnonymous.v1')]?.renewInvalidSession(old,reason)}){
-  let enabled=false,desired=0,round=null,lastRound=0,lastSources=0,nonce,baseline=null,hydrated=false,generation=0,lastPersist=0;
+  let enabled=false,desired=0,configuredLines=0,targetEgresses=0,round=null,lastRound=0,lastSources=0,nonce,baseline=null,hydrated=false,generation=0,lastPersist=0;
   // Round-lifecycle bookkeeping. A maintenance round must never be able to block the pool forever.
   let roundStartedAt=0,roundToken=0,roundAbandons=0,lastProgressAt=0;
   let candidates=[],tested=0,sourceError=null,sourceStates=[],lastSourceAttempt=0;
@@ -65,7 +65,8 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     const next=c.enabled===true;
     if(next!==enabled){enabled=next;generation++;if(!enabled){for(const entry of entries.values())if(!entry.inFlight){entry.agent?.destroy();entry.agent=null;}assignments.clear();}}
     recoveryEnabled=c.autoRecover429===true;
-    desired=Math.min(100,Math.max(1,Number(c.targetCount)||s.connections?.length||1)+(recoveryEnabled?2:0));
+    configuredLines=Math.min(100,Math.max(1,Number(c.targetCount)||s.connections?.length||1));
+    desired=Math.min(100,configuredLines+(recoveryEnabled?2:0));
     const active=new Set((s.connections||[]).map(c=>c.session).filter(Boolean));
     for(const session of assignments.keys())if(!active.has(session))assignments.delete(session);
     for(const [session,issue]of sessionIssues)if(!active.has(session)||issue.until<=now())sessionIssues.delete(session);
@@ -79,7 +80,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     const perUrl=new Map();for(const u of assignments.values())perUrl.set(u,(perUrl.get(u)||0)+1);
     const paidSlots=[...entries.values()].filter(e=>e.paid!=null).map(e=>({slot:e.paid,egress:e.egress||null,ok:!e.failed&&e.until<=t&&e.checkedAt>t-config.healthMaxAgeSeconds*1000,lines:perUrl.get(e.url)||0,concurrency:Number(e.paidConcurrency)||0,linesLimit:Number(e.paidLines)||0,rotations:paidSlotRotations.get(e.paid)||0}));
     const paidHealthy=paidSlots.filter(e=>e.ok);
-    return {enabled,autoRecover429:recoveryEnabled,proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,healthy:usable().length,paidEgresses:paidHealthy.length,paidSlots,paidCapacity:paidHealthy.reduce((n,e)=>n+Math.max(1,e.linesLimit||1),0),paidAssigned:paidSlots.reduce((n,e)=>n+e.lines,0),assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
+    return {enabled,autoRecover429:recoveryEnabled,proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,configuredLines,egressTarget:targetEgresses,healthy:usable().length,paidEgresses:paidHealthy.length,paidSlots,paidCapacity:paidHealthy.reduce((n,e)=>n+Math.max(1,e.linesLimit||1),0),paidAssigned:paidSlots.reduce((n,e)=>n+e.lines,0),assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
   }
   // ---- paid egresses ---------------------------------------------------------------------
   // Dedicated (usually residential) exits. Two forms:
@@ -256,7 +257,14 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
       lastProgressAt=now();
       logger.info?.(`[OpenCodePublicProxy] Healthy proxy=${redact(url)} egress=${ip}`);
     }catch{
-      if(previous){previous.failed=true;if(previous.agent===agent)previous.agent=null;}
+      if(previous){
+        previous.failed=true;
+        previous.failures=(previous.failures||0)+1;
+        // A dead proxy must not be re-probed every round forever: the due list would then grow
+        // with corpses and crowd out candidates that might actually work.
+        previous.until=now()+Math.min(1800,60*Math.pow(2,Math.min(previous.failures-1,5)))*1000;
+        if(previous.agent===agent)previous.agent=null;
+      }
       void agent.destroy();
     }finally{tested++;publish();}
   }
@@ -298,6 +306,14 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
         if(drained)logger.info?.(`[OpenCodePublicProxy] Paid exits can carry all ${lineCount} lines; re-binding ${drained} line(s) off the free pool`);
       }
     }
+    // Probe as many exits as the lines actually need, never one public proxy per configured line.
+    // A 100-line install with sharing used to keep 100 screened exits alive (320 candidates every
+    // round), which is what made the pool and the dashboard crawl when paid traffic dried up.
+    const paidLineCapacity=usable().filter(e=>e.paid!=null).reduce((n,e)=>n+Math.max(1,Number(e.paidLines)||0),0);
+    const uncovered=Math.max(0,configuredLines-paidLineCapacity);
+    const perFree=Math.max(1,Number(config.maxLinesPerEgress)||12);
+    const wanted=(config.allowProxySharing===false?uncovered:Math.ceil(uncovered/perFree))+(recoveryEnabled?2:0);
+    targetEgresses=Math.min(Math.max(1,Number(config.maxEgressTarget)||64),wanted);
     const gen=generation;const force=s.config.refreshNonce!==nonce;nonce=s.config.refreshNonce;
     if(!force&&now()-lastRound<config.replenishIntervalSeconds*1000)return;
     lastRound=now();
@@ -330,7 +346,10 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
         let index=0;
         await Promise.all(Array.from({length:config.probeConcurrency},async()=>{
           while(enabled&&gen===generation&&index<queue.length){
-            if(usable().length>=desired&&!paidPending())break;
+            // Once the line capacity is met, only the paid head of the queue may still be probed.
+            // A permanently dead paid exit must not force a full 320-candidate sweep every round.
+            const paidRetry=paidPending();
+            if(usable().length>=targetEgresses&&(!paidRetry||index>=paid.length))break;
             const url=queue[index++];const e=entries.get(url);
             if(e&&!e.failed&&e.checkedAt>now()-config.healthMaxAgeSeconds*1000)continue;
             await guard(probe(url,gen),Math.max(15000,(config.probeTimeoutMs||6000)*4),'probe '+url);lastProgressAt=now();

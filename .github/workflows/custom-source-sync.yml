@@ -22,6 +22,10 @@ jobs:
   sync-test-build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      changed: ${{ steps.source.outputs.changed }}
+      revision: ${{ steps.source.outputs.revision }}
+      image: ${{ steps.source.outputs.image }}
     permissions:
       contents: write
       packages: write
@@ -54,7 +58,7 @@ jobs:
       - name: Test startup, dashboard auth, native build and restart
         if: steps.source.outputs.changed == 'true'
         run: node custom/scripts/smoke.cjs
-      - name: Publish verified source-built image
+      - name: Publish verified amd64 image
         if: steps.source.outputs.changed == 'true' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -67,10 +71,8 @@ jobs:
           remote_head=$(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' ls-remote origin refs/heads/main | cut -f1)
           test "$remote_head" = "$BASE_HEAD" || { echo 'main changed during build; keeping the previously verified image.'; exit 1; }
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker tag 9router-custom:ci "$IMAGE:sha-$SOURCE_REVISION"
-          docker push "$IMAGE:sha-$SOURCE_REVISION"
-          docker tag 9router-custom:ci "$IMAGE:stable"
-          docker push "$IMAGE:stable"
+          docker tag 9router-custom:ci "$IMAGE:sha-$SOURCE_REVISION-amd64"
+          docker push "$IMAGE:sha-$SOURCE_REVISION-amd64"
       - name: Save synchronized full source and unmodified upstream branch
         if: steps.source.outputs.changed == 'true' && github.event_name != 'pull_request'
         env:
@@ -84,4 +86,74 @@ jobs:
             echo 'Upstream merge conflict: kept the current source and image; resolve it locally to resume synchronization.' >> "$GITHUB_STEP_SUMMARY"
           else
             echo 'Official source and customized tree are unchanged. No rebuild or publication needed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+  # Native arm64 build on a hosted arm runner. QEMU would work but turns a six-minute Next build
+  # into a half-hour one, so Apple Silicon pulls get a real native image instead.
+  build-arm64:
+    needs: sync-test-build
+    if: needs.sync-test-build.outputs.changed == 'true' && github.event_name != 'pull_request'
+    continue-on-error: true
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.sync-test-build.outputs.revision }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+      - name: Compile full customized 9Router source natively for arm64
+        env:
+          SOURCE_REVISION: ${{ needs.sync-test-build.outputs.revision }}
+        run: docker build --build-arg "CUSTOM_REVISION=$SOURCE_REVISION" -t 9router-custom:ci .
+      - name: Test startup, dashboard auth and restart on arm64
+        run: node custom/scripts/smoke.cjs
+      - name: Publish arm64 image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ needs.sync-test-build.outputs.image }}
+          SOURCE_REVISION: ${{ needs.sync-test-build.outputs.revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag 9router-custom:ci "$IMAGE:sha-$SOURCE_REVISION-arm64"
+          docker push "$IMAGE:sha-$SOURCE_REVISION-arm64"
+  publish-multiarch:
+    needs: [sync-test-build, build-arm64]
+    if: always() && needs.sync-test-build.result == 'success' && needs.sync-test-build.outputs.changed == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Publish multi-arch sha and stable tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ needs.sync-test-build.outputs.image }}
+          SOURCE_REVISION: ${{ needs.sync-test-build.outputs.revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if docker buildx imagetools inspect "$IMAGE:sha-$SOURCE_REVISION-arm64" >/dev/null 2>&1; then
+            docker buildx imagetools create -t "$IMAGE:sha-$SOURCE_REVISION" -t "$IMAGE:stable" \
+              "$IMAGE:sha-$SOURCE_REVISION-amd64" "$IMAGE:sha-$SOURCE_REVISION-arm64"
+            echo 'Published linux/amd64 + linux/arm64 under the sha tag and :stable.' >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo '```'
+              docker buildx imagetools inspect "$IMAGE:stable"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '::warning::arm64 image missing; :stable stays on the previous multi-arch build'
+            docker buildx imagetools create -t "$IMAGE:sha-$SOURCE_REVISION" "$IMAGE:sha-$SOURCE_REVISION-amd64"
+            echo '### arm64 image missing' >> "$GITHUB_STEP_SUMMARY"
+            echo 'The amd64 image was published under its sha tag; :stable was not moved.' >> "$GITHUB_STEP_SUMMARY"
           fi

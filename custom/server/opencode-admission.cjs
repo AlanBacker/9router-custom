@@ -3,7 +3,7 @@ const {buildProbe,consumeProbe}=require('./opencode-inference-probe.cjs');
 const {classifyFailure}=require('./opencode-recovery-rules.cjs');
 const PROBE=Symbol.for('9router.opencodeAdmissionProbe.v1');
 function createAdmission({pool,storage,config,now=Date.now,logger=console,builder=buildProbe}){
-  const states=new Map(),modelPauses=new Map();let round=null,windowStart=now(),used=0,cursor=0;
+  const states=new Map(),modelPauses=new Map();let round=null,windowStart=now(),used=0,cursor=0,waiters=0,overloads=0;
   let roundStartedAt=0,roundToken=0;
   const maxPerMinute=config.inferenceProbesPerMinute||24,concurrency=config.inferenceConcurrency||2;
   const models=()=>{const c=storage.read().config||{};return [...new Set((Array.isArray(c.probeModels)?c.probeModels:config.probeModels||[]).filter(m=>typeof m==='string'&&/^[a-zA-Z0-9._-]{1,128}$/.test(m)))].slice(0,8);};
@@ -36,7 +36,7 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
     });
     const readyCount=lines.filter(l=>l.state==='ready').length;
     const readyByModel=Object.fromEntries([...new Set(lines.flatMap(l=>l.requiredModels))].map(model=>[model,lines.filter(l=>l.validatedModels.includes(model)).length]));
-    return {...base,admissionEnabled:true,connectivityHealthy:base.healthy,readyCount,readyByModel,pendingCount:lines.length-readyCount,lines,inferenceProbesThisMinute:used,inferenceProbesPerMinute:maxPerMinute,phase:round?'validating':readyCount?'ready':'waiting'};
+    return {...base,admissionEnabled:true,admissionWaiters:waiters,admissionOverloads:overloads,connectivityHealthy:base.healthy,readyCount,readyByModel,pendingCount:lines.length-readyCount,lines,inferenceProbesThisMinute:used,inferenceProbesPerMinute:maxPerMinute,phase:round?'validating':readyCount?'ready':'waiting'};
   }
   async function validate(connection,genModels){
     const session=connection.session,s=state(session);if(!session||s.testing||s.nextAt>now())return;
@@ -111,14 +111,25 @@ function createAdmission({pool,storage,config,now=Date.now,logger=console,builde
       // bounded by a real clock and by the per-minute probe budget.
       const healthy=pool.snapshot?.().healthy||0;
       const waitMs=healthy>0?(Number(config.admissionWaitMs)||0):(Number(config.admissionShortWaitMs)||0);
+      // A hundred unvalidated lines must not all sit in the same wait loop: that is how a
+      // rate-limited pool turns into a frozen one. Queue a bounded number and fail the rest fast
+      // with a retry hint; they are never routed directly.
+      const maxWaiters=Math.max(1,Number(config.admissionMaxWaiters)||16);
+      if(waitMs>0&&waiters>=maxWaiters){
+        overloads++;
+        return Response.json({error:{type:'OpenCodePublicProxyUnavailable',message:'自动公共代理：当前等待验证的请求已满，请稍后重试（不会回落直连）'}},{status:503,headers:{'retry-after':'2'}});
+      }
       const connection=(storage.read().connections||[]).find(c=>c.session===session);
       const until=Date.now()+waitMs;
-      while(waitMs>0&&!ready(session,model)&&Date.now()<until&&used<maxPerMinute){
-        if(connection)await validate(connection,targets(session)).catch(()=>{});
-        if(ready(session,model))break;
-        if(Date.now()>=until||used>=maxPerMinute)break;
-        await new Promise(resolve=>setTimeout(resolve,250));
-      }
+      if(waitMs>0)waiters++;
+      try{
+        while(waitMs>0&&!ready(session,model)&&Date.now()<until&&used<maxPerMinute){
+          if(connection)await validate(connection,targets(session)).catch(()=>{});
+          if(ready(session,model))break;
+          if(Date.now()>=until||used>=maxPerMinute)break;
+          await new Promise(resolve=>setTimeout(resolve,250));
+        }
+      }finally{if(waitMs>0)waiters--;}
     }
     if(!ready(session,model)){
       const status=require('./availability-status.cjs').describeUnavailable(snapshot(pool.snapshot()),model,{now:now()});
