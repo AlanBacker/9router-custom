@@ -19,10 +19,12 @@ assert(relay.includes('x-9r-egress-proxy'),'relay accepts the per-request egress
 assert(relay.includes('init.proxy = proxy'),'relay hands the egress to Bun fetch');
 assert(relay.includes('startsWith("/inference/")'),'relay only forwards inference paths');
 assert(relay.includes('/__9r/ping')&&relay.includes('x-9r-relay-token'),'relay answers an authenticated readiness ping');
+assert(relay.includes('setDefaultResultOrder')&&relay.includes('DNS_ORDER'),'relay forces IPv4-first DNS (upstream rejects the IPv6 path)');
 
 const manager=read(path.join(root,'custom/server/opencode-bun-relay.cjs'));
 assert(manager.includes('OPENCODE_RELAY_TOKEN'),'relay manager hands a per-process token to Bun');
 assert(manager.includes('scheduleRestart'),'relay is respawned with backoff when it dies');
+assert(manager.includes('--dns-result-order=${dnsOrder()}'),'Bun is spawned IPv4-first (upstream 429s over IPv6)');
 
 const proxy=read(path.join(root,'custom/server/opencode-public-proxy.cjs'));
 assert(proxy.includes("Symbol.for('9router.opencodeRelay.v1')"),'pool reads the relay handle');

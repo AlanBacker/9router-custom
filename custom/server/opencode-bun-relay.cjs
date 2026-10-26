@@ -65,6 +65,16 @@ function bunBinary() {
 }
 
 /**
+ * Upstream rejects free-tier inference over IPv6 while accepting the identical
+ * request over IPv4, and Bun prefers AAAA by default. The flag is passed on the
+ * command line so it also covers fetch calls made before any script code runs.
+ */
+function dnsOrder() {
+  const value = String(process.env.OPENCODE_RELAY_DNS_ORDER || "ipv4first").trim();
+  return value === "verbatim" || value === "ipv6first" ? value : "ipv4first";
+}
+
+/**
  * Start the relay unless disabled. Idempotent; never throws.
  * @param {{ port?: number, script?: string, logger?: Console }} [options]
  */
@@ -129,7 +139,7 @@ function startBunRelay(options = {}) {
     if (record.stopping) return;
     let child;
     try {
-      child = spawn(bin, [script], {
+      child = spawn(bin, [`--dns-result-order=${dnsOrder()}`, script], {
         env: { ...process.env, OPENCODE_RELAY_PORT: String(port), OPENCODE_RELAY_TOKEN: record.token },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,

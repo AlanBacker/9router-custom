@@ -15,10 +15,27 @@
  * Bound to loopback only. Absolute upstream host and path are fixed, so this
  * cannot be used as an open proxy.
  */
+import { setDefaultResultOrder } from "node:dns";
+
 const PORT = Number(process.env.OPENCODE_RELAY_PORT || 20129);
 const UPSTREAM = process.env.OPENCODE_RELAY_UPSTREAM || "https://opencode.ai";
 const TOKEN = process.env.OPENCODE_RELAY_TOKEN || "";
 const MAX_BODY = 32 * 1024 * 1024;
+
+/**
+ * Upstream rejects the free tier when the connection arrives over IPv6 (the
+ * same request over IPv4 is accepted), and Bun resolves AAAA first by default.
+ * Force IPv4 unless the operator explicitly asks for another order.
+ */
+const DNS_ORDER =
+  process.env.OPENCODE_RELAY_DNS_ORDER === "verbatim" || process.env.OPENCODE_RELAY_DNS_ORDER === "ipv6first"
+    ? process.env.OPENCODE_RELAY_DNS_ORDER
+    : "ipv4first";
+try {
+  setDefaultResultOrder(DNS_ORDER);
+} catch {
+  /* older Bun: the --dns-result-order spawn flag still applies */
+}
 
 const REQUEST_STRIP = new Set([
   "host",
@@ -154,5 +171,5 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 console.log(
-  `[opencode-relay] listening on 127.0.0.1:${PORT} upstream=${UPSTREAM} bun=${Bun.version}`,
+  `[opencode-relay] listening on 127.0.0.1:${PORT} upstream=${UPSTREAM} bun=${Bun.version} dns=${DNS_ORDER}`,
 );
