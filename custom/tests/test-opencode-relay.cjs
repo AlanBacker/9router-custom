@@ -49,5 +49,6 @@ assert(prompt.length>1500,'captured title prompt is complete');
   assert.equal(body.stream_options.include_usage,true,'probe asks for usage so completion is observable');
   assert.equal(probe.init.headers['user-agent'],'opencode/latest/2.0.26/cli');
   assert.equal(probe.init.headers['x-opencode-client'],'cli');
+  for(const name of ['x-opencode-session','x-opencode-session-id','x-session-id','x-session-affinity'])assert.equal(probe.init.headers[name],'ses_0123456789abABCDEFGHIJKLMN',`probe carries ${name} (upstream 429s without a session header)`);
   console.log('PASS: Bun relay wiring, per-request egress, untouched caller tools, official probe template.');
 })().catch(e=>{console.error(e);process.exitCode=1});
