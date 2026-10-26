@@ -4,20 +4,24 @@
  *
  * Upstream free-tier inference only accepts the Bun TLS fingerprint, so the
  * Node app proxies /inference/* through a co-located Bun process. This module
- * spawns it once, waits (asynchronously) until the loopback port accepts
- * connections, and publishes { ready, url } on a global symbol that
- * opencode-public-proxy.cjs reads for every request.
+ * spawns it once, waits (asynchronously) until the loopback port answers a
+ * token-authenticated ping, and publishes { ready, url, token } on a global
+ * symbol that opencode-public-proxy.cjs reads for every request.
  *
- * Fail-open by design: without Bun the pool keeps working exactly as before
- * (Node -> upstream), it just keeps hitting the upstream 429 gate.
+ * Unattended by design: a crashed relay is respawned with backoff, and the
+ * whole subsystem fails open (Node transport) when Bun is not installed.
  */
-const net = require("node:net");
+const crypto = require("node:crypto");
+const http = require("node:http");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const SYMBOL = Symbol.for("9router.opencodeRelay.v1");
 const DEFAULT_PORT = 20129;
 const READY_TIMEOUT_MS = 20000;
+const PING_PATH = "/__9r/ping";
+const BACKOFF_MS = [1000, 2000, 5000, 10000, 30000, 60000];
+const MAX_ATTEMPTS = 6;
 
 function state() {
   return globalThis[SYMBOL] || null;
@@ -29,34 +33,35 @@ function relayUrl() {
   return s && s.ready && s.url ? s.url : "";
 }
 
-function probePort(port, host, timeoutMs) {
+function pingRelay(port, token, timeoutMs = 800) {
   return new Promise((resolve) => {
-    const socket = net.connect({ port, host });
-    let settled = false;
-    const done = (ok) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(ok);
-    };
-    socket.setTimeout(timeoutMs);
-    socket.once("connect", () => done(true));
-    socket.once("timeout", () => done(false));
-    socket.once("error", () => done(false));
+    const req = http.request(
+      { host: "127.0.0.1", port, path: PING_PATH, method: "GET", timeout: timeoutMs, headers: { "x-9r-relay-token": token } },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode === 200));
+      },
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.on("error", () => resolve(false));
+    req.end();
   });
 }
 
-async function waitUntilReady(port, deadline) {
+async function waitUntilReady(port, token, deadline, alive) {
   while (Date.now() < deadline) {
-    if (await probePort(port, "127.0.0.1", 500)) return true;
-    await new Promise((r) => setTimeout(r, 120));
+    if (!alive()) return false;
+    if (await pingRelay(port, token)) return true;
+    await new Promise((r) => setTimeout(r, 150));
   }
   return false;
 }
 
 function bunBinary() {
-  if (process.env.BUN_BIN) return process.env.BUN_BIN;
-  return "bun";
+  return process.env.BUN_BIN || "bun";
 }
 
 /**
@@ -73,9 +78,13 @@ function startBunRelay(options = {}) {
     ready: false,
     url: "",
     port,
+    token: crypto.randomBytes(16).toString("hex"),
     child: null,
     error: null,
+    attempts: 0,
+    lastReadyAt: 0,
     startedAt: Date.now(),
+    stopping: false,
   };
   globalThis[SYMBOL] = record;
 
@@ -84,54 +93,15 @@ function startBunRelay(options = {}) {
     return record;
   }
 
-  const script =
-    options.script || path.join(__dirname, "opencode-bun-relay.ts");
+  const script = options.script || path.join(__dirname, "opencode-bun-relay.ts");
   const bin = bunBinary();
-
-  let child;
-  try {
-    child = spawn(bin, [script], {
-      env: {
-        ...process.env,
-        OPENCODE_RELAY_PORT: String(port),
-      },
-      stdio: ["ignore", "ignore", "pipe"],
-      windowsHide: true,
-    });
-  } catch (error) {
-    record.error = error?.message || String(error);
-    logger.warn?.(`[OpenCodeRelay] bun unavailable (${record.error}); inference stays on Node transport`);
-    return record;
-  }
-
-  record.child = child;
-  let stderr = "";
-  child.stderr?.on("data", (chunk) => {
-    const text = String(chunk);
-    stderr = (stderr + text).slice(-2000);
-    for (const line of text.split(/\r?\n/)) {
-      if (line.trim()) logger.info?.(line.trim());
-    }
-  });
-  child.once("error", (error) => {
-    record.error = error?.message || String(error);
-    record.ready = false;
-    record.url = "";
-    logger.warn?.(`[OpenCodeRelay] failed to start bun (${record.error}); inference stays on Node transport`);
-  });
-  child.once("exit", (code, signal) => {
-    record.ready = false;
-    record.url = "";
-    if (!record.stopping && (code !== 0 || signal)) {
-      record.error = `relay exited code=${code} signal=${signal || ""} ${stderr.slice(-400)}`.trim();
-      logger.warn?.(`[OpenCodeRelay] ${record.error}`);
-    }
-  });
 
   const stop = () => {
     record.stopping = true;
+    record.ready = false;
+    record.url = "";
     try {
-      child.kill();
+      record.child?.kill();
     } catch {
       /* ignore */
     }
@@ -140,22 +110,83 @@ function startBunRelay(options = {}) {
   process.once("SIGTERM", stop);
   process.once("exit", stop);
 
-  void (async () => {
-    const ready = await waitUntilReady(port, Date.now() + READY_TIMEOUT_MS);
-    if (!ready) {
-      record.error = record.error || "relay did not open its port";
-      logger.warn?.(
-        `[OpenCodeRelay] ${record.error} (bun=${bin}); inference stays on Node transport (upstream 429 expected)`,
-      );
+  const scheduleRestart = () => {
+    if (record.stopping) return;
+    record.ready = false;
+    record.url = "";
+    if (Date.now() - record.lastReadyAt > 300000) record.attempts = 0;
+    const delay = BACKOFF_MS[Math.min(record.attempts, BACKOFF_MS.length - 1)];
+    record.attempts++;
+    if (record.attempts === MAX_ATTEMPTS) {
+      logger.warn?.("[OpenCodeRelay] relay keeps crashing; continuing to retry at the 60s backoff cap");
+    }
+    logger.warn?.(`[OpenCodeRelay] restarting relay in ${delay}ms (attempt ${record.attempts})`);
+    const timer = setTimeout(launch, delay);
+    timer.unref?.();
+  };
+
+  function launch() {
+    if (record.stopping) return;
+    let child;
+    try {
+      child = spawn(bin, [script], {
+        env: { ...process.env, OPENCODE_RELAY_PORT: String(port), OPENCODE_RELAY_TOKEN: record.token },
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+    } catch (error) {
+      record.error = error?.message || String(error);
+      logger.warn?.(`[OpenCodeRelay] bun unavailable (${record.error}); inference stays on Node transport`);
       return;
     }
-    record.ready = true;
-    record.url = `http://127.0.0.1:${port}`;
-    logger.info?.(
-      `[OpenCodeRelay] Bun transport ready at ${record.url} (${Date.now() - record.startedAt}ms)`,
-    );
-  })();
 
+    record.child = child;
+    let captured = "";
+    const log = (stream, chunk) => {
+      const text = String(chunk);
+      captured = (captured + text).slice(-2000);
+      for (const line of text.split(/\r?\n/)) if (line.trim()) stream?.(line.trim());
+    };
+    child.stdout?.on("data", (chunk) => log(logger.info?.bind(logger), chunk));
+    child.stderr?.on("data", (chunk) => log(logger.info?.bind(logger), chunk));
+    child.once("error", (error) => {
+      record.error = error?.message || String(error);
+      logger.warn?.(`[OpenCodeRelay] failed to start bun (${record.error}); inference stays on Node transport`);
+    });
+    child.once("exit", (code, signal) => {
+      record.ready = false;
+      record.url = "";
+      if (record.stopping) return;
+      record.error = `relay exited code=${code} signal=${signal || ""} ${captured.slice(-400)}`.trim();
+      logger.warn?.(`[OpenCodeRelay] ${record.error}`);
+      scheduleRestart();
+    });
+
+    void (async () => {
+      const alive = () => record.child === child && child.exitCode === null;
+      const ready = await waitUntilReady(port, record.token, Date.now() + READY_TIMEOUT_MS, alive);
+      if (!ready) {
+        if (alive()) {
+          record.error = record.error || `relay did not answer ${PING_PATH} within ${READY_TIMEOUT_MS}ms`;
+          logger.warn?.(`[OpenCodeRelay] ${record.error} (bun=${bin})`);
+          try {
+            child.kill();
+          } catch {
+            /* ignore */
+          }
+        }
+        return;
+      }
+      record.ready = true;
+      record.url = `http://127.0.0.1:${port}`;
+      record.error = null;
+      record.attempts = 0;
+      record.lastReadyAt = Date.now();
+      logger.info?.(`[OpenCodeRelay] Bun transport ready at ${record.url} (${Date.now() - record.startedAt}ms)`);
+    })();
+  }
+
+  launch();
   return record;
 }
 

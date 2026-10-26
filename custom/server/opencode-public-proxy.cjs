@@ -21,6 +21,7 @@ function relayHeaders(headers,egress){
   const out=new Headers(headers||{});
   // Credentials stay on loopback: the relay strips this header before forwarding.
   if(egress)out.set('x-9r-egress-proxy',String(egress));
+  try{const s=globalThis[RELAY];if(s?.token)out.set('x-9r-relay-token',s.token);}catch{}
   return out;
 }
 

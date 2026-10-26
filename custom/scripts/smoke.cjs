@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const assert=require('node:assert/strict'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process');
 const run=(...args)=>execFileSync('docker',args,{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
 (async()=>{
@@ -12,7 +12,7 @@ const run=(...args)=>execFileSync('docker',args,{encoding:'utf8',stdio:['ignore'
   run('exec','-u','node',name,'node','/app/custom/server/check-proxy-runtime.cjs');
   assert.match(run('exec','-u','node',name,'bun','--version'),/^\d+\.\d+\.\d+/, 'Bun runtime is present for the inference relay');
   run('exec','-u','node',name,'node','-e','const net=require("net"),s=net.connect(20129,"127.0.0.1");s.on("connect",()=>{s.end();process.exit(0)});s.on("error",()=>process.exit(1))');
-  assert(/\[OpenCodeRelay\] Bun transport ready/.test(run('logs',name)),'inference relay started with the app');
+  assert(/\[OpenCodeRelay\] Bun transport ready/.test(run('logs','--tail','200',name)),'inference relay started with the app');
   const before=run('inspect','--format','{{.Image}}',name);run('restart',name);base=getBase();
   let restarted=false;let last='no response';for(let n=0;n<90;n++){try{const r=await fetch(base+'/api/health',{signal:AbortSignal.timeout(1000)});last='HTTP '+r.status;if(r.ok){restarted=true;break;}}catch(e){last=e.message;}await new Promise(r=>setTimeout(r,500));}assert(restarted,'Restart health check failed at '+base+': '+last);assert.equal(run('inspect','--format','{{.Image}}',name),before);
   run('exec','-u','node',name,'node','/app/custom/scripts/verify-build.cjs');

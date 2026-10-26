@@ -17,6 +17,7 @@
  */
 const PORT = Number(process.env.OPENCODE_RELAY_PORT || 20129);
 const UPSTREAM = process.env.OPENCODE_RELAY_UPSTREAM || "https://opencode.ai";
+const TOKEN = process.env.OPENCODE_RELAY_TOKEN || "";
 const MAX_BODY = 32 * 1024 * 1024;
 
 const REQUEST_STRIP = new Set([
@@ -28,6 +29,7 @@ const REQUEST_STRIP = new Set([
   "proxy-connection",
   "upgrade",
   "x-9r-egress-proxy",
+  "x-9r-relay-token",
 ]);
 const RESPONSE_STRIP = new Set([
   "content-encoding",
@@ -44,6 +46,12 @@ const server = Bun.serve({
   maxRequestBodySize: MAX_BODY,
   async fetch(req) {
     const url = new URL(req.url);
+    const authorized = !TOKEN || req.headers.get("x-9r-relay-token") === TOKEN;
+    if (url.pathname === "/__9r/ping") {
+      if (!authorized) return new Response("forbidden", { status: 401 });
+      return Response.json({ ok: true, pid: process.pid });
+    }
+    if (!authorized) return new Response("forbidden", { status: 401 });
     if (!url.pathname.startsWith("/inference/")) {
       return new Response("not found", { status: 404 });
     }
