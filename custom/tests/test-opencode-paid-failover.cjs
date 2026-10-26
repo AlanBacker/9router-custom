@@ -53,7 +53,7 @@ function fixture({ banPaidBudget = 0 } = {}) {
     if (u === config.sources[0]) return new Response(Object.keys(freeIps).map(x => x.replace('http://', '')).join('\n'));
     if (u === config.ipCheckUrl) return Response.json({ ip: ipOf(url) });
     if (u === config.targetCheckUrl) return Response.json({ data: [] });
-    const isProbe = String(init.body || '').includes('"tools"');
+    const isProbe = String(init.body || '').includes('Reply OK.');
     if (isProbe) { counters.screens++; return sse(); }
     // Business traffic: the upstream refuses this exit IP.
     if (/paid\.example/.test(String(url || ''))) {

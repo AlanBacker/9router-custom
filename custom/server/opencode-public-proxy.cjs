@@ -3,6 +3,27 @@ const fs=require('node:fs'),path=require('node:path'),net=require('node:net'),cr
 const {classifyFailure,transportFailure}=require('./opencode-recovery-rules.cjs');
 const EGRESS=Symbol.for('9router.opencodeEgress.v1');
 const MARK=Symbol.for('9router.opencodePublicProxy.v1');
+const RELAY=Symbol.for('9router.opencodeRelay.v1');
+
+// Upstream free-tier inference is gated on the Bun TLS fingerprint, so requests
+// are re-issued through the co-located Bun relay. When it is not up yet (or Bun
+// is missing) callers fall back to the previous direct Node transport.
+function relayBase(){
+  try{const s=globalThis[RELAY];return s&&s.ready&&s.url?s.url:'';}catch{return '';}
+}
+function relayTarget(input){
+  try{
+    const u=new URL(typeof input==='string'?input:input instanceof URL?input.href:input.url);
+    return relayBase()+u.pathname+u.search;
+  }catch{return '';}
+}
+function relayHeaders(headers,egress){
+  const out=new Headers(headers||{});
+  // Credentials stay on loopback: the relay strips this header before forwarding.
+  if(egress)out.set('x-9r-egress-proxy',String(egress));
+  return out;
+}
+
 
 function publicIPv4(ip){
   if(net.isIP(ip)!==4)return false;
@@ -80,7 +101,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     const perUrl=new Map();for(const u of assignments.values())perUrl.set(u,(perUrl.get(u)||0)+1);
     const paidSlots=[...entries.values()].filter(e=>e.paid!=null).map(e=>({slot:e.paid,egress:e.egress||null,ok:!e.failed&&e.until<=t&&e.checkedAt>t-config.healthMaxAgeSeconds*1000,lines:perUrl.get(e.url)||0,concurrency:Number(e.paidConcurrency)||0,linesLimit:Number(e.paidLines)||0,rotations:paidSlotRotations.get(e.paid)||0}));
     const paidHealthy=paidSlots.filter(e=>e.ok);
-    return {enabled,autoRecover429:recoveryEnabled,proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,configuredLines,egressTarget:targetEgresses,healthy:usable().length,paidEgresses:paidHealthy.length,paidSlots,paidCapacity:paidHealthy.reduce((n,e)=>n+Math.max(1,e.linesLimit||1),0),paidAssigned:paidSlots.reduce((n,e)=>n+e.lines,0),assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
+    return {enabled,autoRecover429:recoveryEnabled,transport:relayBase()?'bun':'node',proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,configuredLines,egressTarget:targetEgresses,healthy:usable().length,paidEgresses:paidHealthy.length,paidSlots,paidCapacity:paidHealthy.reduce((n,e)=>n+Math.max(1,e.linesLimit||1),0),paidAssigned:paidSlots.reduce((n,e)=>n+e.lines,0),assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
   }
   // ---- paid egresses ---------------------------------------------------------------------
   // Dedicated (usually residential) exits. Two forms:
@@ -388,7 +409,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     let url,headers;
     try{url=new URL(typeof input==='string'?input:input instanceof URL?input.href:input.url);headers=new Headers(init?.headers);}catch{return nativeFetch(input,init);}
     if(url.hostname!=='opencode.ai'||!url.pathname.startsWith('/inference/')||String(init?.method).toUpperCase()!=='POST'||headers.get('authorization')!=='Bearer public')return nativeFetch(input,init);
-    const s=settings();if(!enabled)return nativeFetch(input,init);
+    const s=settings();if(!enabled)return relayBase()?nativeFetch(relayTarget(input),{...init,headers:relayHeaders(headers)}):nativeFetch(input,init);
     if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
     hydrate();void refresh();
     let session=headers.get('x-opencode-session');if(!session)return failure('缺少固定上游会话，自动公共代理未发送请求');
@@ -431,7 +452,9 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
       entry.inFlight++;
       const end=()=>{const n=(inFlightSessions.get(held)||1)-1;if(n>0)inFlightSessions.set(held,n);else inFlightSessions.delete(held);entry.inFlight=Math.max(0,entry.inFlight-1);publish(true);};
       try{
-        const response=await nativeFetch(input,{...init,headers,dispatcher:dispatcher(entry),[EGRESS]:entry.egress});
+        const response=relayBase()
+          ? await nativeFetch(relayTarget(input),{...init,headers:relayHeaders(headers,entry.url),[EGRESS]:entry.egress})
+          : await nativeFetch(input,{...init,headers,dispatcher:dispatcher(entry),[EGRESS]:entry.egress});
         let detail;
         if(!response.ok&&!/text\/event-stream/i.test(response.headers.get('content-type')||''))try{detail=JSON.parse(await limitedText(response.clone(),65536));}catch{}
         const issue=classifyFailure(response.status,detail);
@@ -542,7 +565,8 @@ function createEgressScreen(options){
     try{request=await buildProbe(model,slot.id,config);}
     catch(e){if(!builderWarned){builderWarned=true;logger.warn?.('[OpenCodePublicProxy] Egress inference screen unavailable: '+e.message);}return {ok:true,status:0,skipped:'builder'};}
     try{
-      const response=await options.nativeFetch(request.url,{...request.init,dispatcher:agent,signal:AbortSignal.timeout(config.inferenceTimeoutMs||12000)});
+      const viaRelay=relayBase();
+      const response=await options.nativeFetch(viaRelay?relayTarget(request.url):request.url,{...(viaRelay?{...request.init,headers:relayHeaders(request.init.headers,url)}:{...request.init,dispatcher:agent}),signal:AbortSignal.timeout(config.inferenceTimeoutMs||12000)});
       const result=await consumeProbe(response);
       if(result.status===429){
         const wait=Math.min(1800,Math.max(60,Number(result.retryAfter)||180));

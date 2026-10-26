@@ -44,7 +44,7 @@ function fixture() {
     if (u === config.sources[0]) return new Response(Object.keys(freeIps).map(x => x.replace('http://', '')).join('\n'));
     if (u === config.ipCheckUrl) return Response.json({ ip: url ? ipOf(url) : '4.2.2.2' });
     if (u === config.targetCheckUrl) return Response.json({ data: [] });
-    if (String(init.body || '').includes('"tools"')) return sse();
+    if (String(init.body || '').includes('Reply OK.')) return sse();
     return new Response('{}');
   };
   const pool = createPool({

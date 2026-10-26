@@ -43,7 +43,7 @@ function fixture(overrides={}){
     if(u===cfg.sources[0])return new Response(Object.keys(freeIps).map(x=>x.replace('http://','')).join('\n'));
     if(u===cfg.ipCheckUrl)return Response.json({ip:url?ipOf(url):'4.2.2.2'});
     if(u===cfg.targetCheckUrl)return Response.json({data:[]});
-    if(String(init.body||'').includes('"tools"')){
+    if(String(init.body||'').includes('Reply OK.')){
       const ip=ipOf(url);
       if(blockedIps.has(ip))return Response.json({error:{type:'FreeTierError',message:'Forbidden'}},{status:403});
       if(blockFirstPaid&&!blockedIps.size&&/paid\.example/.test(String(url||''))){blockedIps.add(ip);return Response.json({error:{type:'FreeTierError',message:'Forbidden'}},{status:403});}

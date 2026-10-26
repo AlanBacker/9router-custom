@@ -380,7 +380,10 @@ export class OpenCodeExecutor extends BaseExecutor {
       applyFingerprintTools(body, true);
     } else if (body && typeof body === "object") {
       dropAdaptiveReasoningEffort(body);
-      applyFingerprintTools(body, false);
+      // 2026-10-25: the free-tier gate now matches the complete request template
+      // (official system prompt + the official tool set). Injecting read/shell
+      // into a caller's tool list breaks that template and every request becomes
+      // 429 FreeUsageLimitError, so caller tools travel untouched here.
     }
     return injectReasoningContent({ provider: this.provider, model, body });
   }

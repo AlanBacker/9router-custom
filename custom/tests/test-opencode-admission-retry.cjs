@@ -17,7 +17,7 @@ function fixture({biz403=0,healthy=3,probeOk=true}={}){
       // The admission layer marks both probes and business calls with the same symbol, so tell
       // them apart the way the pool does: probes carry the tool schema in the body.
       const body=String(i.body||'');
-      if(body.includes('"tools"')){
+      if(body.includes('Reply OK.')){
         calls.push('probe');
         if(!probeOk)return Response.json({error:{message:'proxy down'}},{status:502});
         binding={url:'http://proxy-b:9090',egress:'2.2.2.2'};return sse();

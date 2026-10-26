@@ -4,6 +4,10 @@ ARG ALPINE_MIRROR=dl-cdn.alpinelinux.org
 ARG NPM_REGISTRY=https://registry.npmjs.org/
 ARG APP_VERSION=unknown
 
+# Upstream free-tier inference only accepts the Bun TLS fingerprint; the relay
+# binary is copied into the runtime image (musl build to match Alpine).
+FROM oven/bun:1-alpine AS bunbin
+
 FROM ${NODE_IMAGE} AS base
 ARG ALPINE_MIRROR
 WORKDIR /app
@@ -57,6 +61,11 @@ ENV PORT=20128
 ENV HOSTNAME=0.0.0.0
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV DATA_DIR=/app/data
+
+# Upstream free-tier inference rejects Node/undici TLS fingerprints with
+# 429 FreeUsageLimitError; the co-located relay must run on Bun.
+COPY --from=bunbin /usr/local/bin/bun /usr/local/bin/bun
+RUN chmod +x /usr/local/bin/bun
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/static ./.next/static

@@ -13,9 +13,17 @@ async function buildProbe(model,session,config){
   }
   if(native.messages.has(model))throw new Error('Probe model uses unsupported Messages protocol; choose Chat Completions or Responses model');
   const flat=native.responses.has(model),body={model,stream:true};
-  if(flat){body.input=[{type:'message',role:'user',content:[{type:'input_text',text:'Reply OK.'}]}];body.max_output_tokens=config.inferenceMaxTokens||64;body.store=false;}
-  else{body.messages=[{role:'user',content:'Reply OK.'}];body.max_tokens=config.inferenceMaxTokens||64;}
-  native.fingerprint.applyFingerprintTools(body,flat);
+  if(flat){body.input=[{type:'message',role:'user',content:[{type:'input_text',text:'Reply OK.'}]}];body.max_output_tokens=config.inferenceMaxTokens||64;body.store=false;native.fingerprint.applyFingerprintTools(body,true);}
+  else{
+    // Upstream free-tier gate compares the whole request template against the
+    // official client: a generic/no system prompt and any tool list are both
+    // rejected with 429 FreeUsageLimitError. The title-generation template
+    // (exact 2.0.32 system prompt, no tools) is the smallest known-good shape.
+    const prompt=require('./opencode-native-prompt.json').title;
+    body.messages=[{role:'system',content:prompt},{role:'user',content:'Reply OK.'}];
+    body.max_tokens=config.inferenceMaxTokens||64;
+    body.stream_options={include_usage:true};
+  }
   const headers={'content-type':'application/json',authorization:'Bearer public','user-agent':native.ua,'x-opencode-client':native.client,accept:'text/event-stream','x-opencode-project':'global'};
   for(const name of ['x-opencode-session','x-opencode-session-id','x-session-id','x-session-affinity'])headers[name]=session;
   return {url:'https://opencode.ai/inference/v1/'+(flat?'responses':'chat/completions'),init:{method:'POST',headers,body:JSON.stringify(body)}};
