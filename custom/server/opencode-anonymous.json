@@ -16,5 +16,5 @@
   "maxCooldowns": 512,
   "endpointCooldownSeconds": 5,
   "defaultSessionCooldownSeconds": 2,
-  "maxCooldownSeconds": 86400
+  "maxCooldownSeconds": 120
 }

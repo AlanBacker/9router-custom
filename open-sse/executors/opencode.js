@@ -8,6 +8,7 @@ import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel } from "../providers/models/helpers.js";
 import { applyFingerprintTools } from "../utils/opencodeFingerprint.js";
+import { applyChatTemplate } from "../utils/opencodeChatTemplate.js";
 import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
 import {
   normalizeResponsesInput,
@@ -380,10 +381,12 @@ export class OpenCodeExecutor extends BaseExecutor {
       applyFingerprintTools(body, true);
     } else if (body && typeof body === "object") {
       dropAdaptiveReasoningEffort(body);
-      // 2026-10-25: the free-tier gate now matches the complete request template
-      // (official system prompt + the official tool set). Injecting read/shell
-      // into a caller's tool list breaks that template and every request becomes
-      // 429 FreeUsageLimitError, so caller tools travel untouched here.
+      // 2026-10-25: the free-tier gate matches the complete request template
+      // (official system prompt + the official tool set). Real OpenCode clients
+      // already send it, so they travel untouched; every other client (AstrBot,
+      // chat UIs, Claude Code) is mapped onto the same official template while
+      // keeping its own function tools callable.
+      applyChatTemplate(body);
     }
     return injectReasoningContent({ provider: this.provider, model, body });
   }
