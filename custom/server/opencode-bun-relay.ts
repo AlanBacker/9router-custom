@@ -39,6 +39,37 @@ const RESPONSE_STRIP = new Set([
   "keep-alive",
 ]);
 
+type ProbeShape = {
+  model?: string;
+  messages?: Array<{ role?: string; content?: unknown }>;
+  tools?: Array<{ function?: { name?: string }; name?: string }>;
+  reasoning_effort?: string;
+  reasoning?: { effort?: string };
+};
+
+/** Counts and names only: never logs prompts, tool arguments or message text. */
+function describeRequest(body: ArrayBuffer | undefined, req: Request): string {
+  const session = req.headers.get("x-opencode-session") || req.headers.get("x-session-id") ? "y" : "n";
+  if (!body) return `body=none sess=${session}`;
+  const parsed = JSON.parse(new TextDecoder().decode(body)) as ProbeShape;
+  const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+  const system = messages.find((message) => message?.role === "system");
+  const systemText = typeof system?.content === "string" ? system.content : "";
+  const tools = Array.isArray(parsed.tools)
+    ? parsed.tools.map((tool) => tool?.function?.name || tool?.name).filter((name): name is string => Boolean(name))
+    : [];
+  const roles = messages.map((message) => (message?.role || "?").slice(0, 1)).join("");
+  const effort = parsed.reasoning_effort || parsed.reasoning?.effort || "";
+  return [
+    `model=${parsed.model || "-"}`,
+    `msgs=${messages.length}(${roles})`,
+    `sys=${systemText.length}${systemText.startsWith("You are a title generator.") ? ":title" : ""}`,
+    `tools=${tools.length}${tools.length ? `[${tools.slice(0, 13).join(",")}]` : ""}`,
+    `effort=${effort || "-"}`,
+    `sess=${session}`,
+  ].join(" ");
+}
+
 const server = Bun.serve({
   port: PORT,
   hostname: "127.0.0.1",
@@ -66,6 +97,7 @@ const server = Bun.serve({
     if (req.method !== "GET" && req.method !== "HEAD") {
       body = await req.arrayBuffer();
     }
+    const startedAt = Date.now();
 
     let upstream: Response;
     try {
@@ -84,6 +116,18 @@ const server = Bun.serve({
         { error: { type: "RelayUpstreamError", message } },
         { status: 502 },
       );
+    }
+
+    // Shape-only diagnostics: counts and names, never message content.
+    if (process.env.OPENCODE_RELAY_LOG !== "0") {
+      try {
+        const shape = describeRequest(body, req);
+        console.log(
+          `[opencode-relay] ${upstream.status} ${shape} via=${proxy ? "proxy" : "direct"} ${Date.now() - startedAt}ms`,
+        );
+      } catch {
+        /* logging must never break forwarding */
+      }
     }
 
     const out = new Headers();
