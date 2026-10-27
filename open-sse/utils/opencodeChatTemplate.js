@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * The OpenCode free tier matches the whole official `(system, tools)` template.
@@ -10,13 +11,23 @@ import { readFileSync } from "node:fs";
  * The template lives in custom/server/opencode-native-prompt.json because that
  * file is also used by the inference probe (title lane).
  */
-const NATIVE = (() => {
-  try {
-    return JSON.parse(readFileSync(new URL("../../custom/server/opencode-native-prompt.json", import.meta.url), "utf8"));
-  } catch {
-    return null;
+function loadNative() {
+  const candidates = [];
+  if (process.env.NINEROUTER_APP_ROOT) candidates.push(join(process.env.NINEROUTER_APP_ROOT, "custom/server/opencode-native-prompt.json"));
+  candidates.push(join(process.cwd(), "custom/server/opencode-native-prompt.json"));
+  candidates.push(new URL("../../custom/server/opencode-native-prompt.json", import.meta.url));
+  for (const file of candidates) {
+    try {
+      return JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      /* try the next location (bundled server vs. source tree) */
+    }
   }
-})();
+  console.warn("[OpenCodeChatTemplate] official template not found; non-OpenCode clients stay unchanged");
+  return null;
+}
+
+const NATIVE = loadNative();
 
 const AGENT_PREFIX = typeof NATIVE?.agent === "string" ? NATIVE.agent.slice(0, 120) : "";
 const TITLE_PREFIX = typeof NATIVE?.title === "string" ? NATIVE.title.slice(0, 64) : "";
