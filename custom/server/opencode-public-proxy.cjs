@@ -675,8 +675,13 @@ function getProxyAgent(){
   }
   return require('node:module').createRequire(path.join(process.env.NINEROUTER_APP_ROOT||process.cwd(),'package.json'))('undici').ProxyAgent;
 }
-module.exports={publicIPv4,normalizeProxy,normalizePaidProxy,parseCandidates,mergeCandidates,createPool,createTransportPool,limitedText,getProxyAgent,readSessionCache,relayGuard,waitForRelay,isFreeInference,relayError};
-if(process.env.NINEROUTER_OPENCODE_PUBLIC_PROXY==='1'&&!globalThis[MARK]){
+/**
+ * Install the pool on globalThis.fetch. Must be callable explicitly: verify-build.cjs
+ * imports this module before preload sets the environment, so a load-time-only hook
+ * would leave the module cached with the env unset and the pool would never install.
+ */
+function installPublicProxy(){
+  if(process.env.NINEROUTER_OPENCODE_PUBLIC_PROXY!=='1'||globalThis[MARK])return globalThis[MARK]||null;
   const config=JSON.parse(fs.readFileSync(path.join(__dirname,'opencode-public-proxy.json'),'utf8'));
   if(process.env.DATA_DIR)for(const key of ['dbFile','stateFile'])config[key]=config[key].replace(/^\/app\/data(?=\/|$)/,process.env.DATA_DIR);
   const pool=createPool({nativeFetch:globalThis.fetch.bind(globalThis),config,storage:runtimeStorage(config),makeAgent:uri=>new (getProxyAgent())({uri,requestTls:{rejectUnauthorized:true},proxyTls:{rejectUnauthorized:true},connect:{timeout:config.probeTimeoutMs}})});
@@ -685,4 +690,7 @@ if(process.env.NINEROUTER_OPENCODE_PUBLIC_PROXY==='1'&&!globalThis[MARK]){
   globalThis[MARK]=pool;globalThis.fetch=guarded;
   const timer=setInterval(()=>pool.tick(),3000);timer.unref();pool.tick();
   console.info('[OpenCodePublicProxy] Installed: disabled unless enabled in the dashboard; strict HTTPS and distinct tested egresses.');
+  return pool;
 }
+module.exports={publicIPv4,normalizeProxy,normalizePaidProxy,parseCandidates,mergeCandidates,createPool,createTransportPool,limitedText,getProxyAgent,readSessionCache,relayGuard,waitForRelay,isFreeInference,relayError,installPublicProxy};
+installPublicProxy();

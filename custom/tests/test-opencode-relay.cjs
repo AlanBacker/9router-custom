@@ -53,6 +53,16 @@ assert(prompt.length>1500,'captured title prompt is complete');
   assert.equal(probe.init.headers['x-opencode-client'],'cli');
   for(const name of ['x-opencode-session','x-opencode-session-id','x-session-id','x-session-affinity'])assert.equal(probe.init.headers[name],'ses_0123456789abABCDEFGHIJKLMN',`probe carries ${name} (upstream 429s without a session header)`);
 
+  // verify-build.cjs requires the proxy module before preload sets the environment,
+  // which leaves it cached with the install hook disabled. The pool must therefore be
+  // installable explicitly, and preload must call it.
+  const preloadSrc=read(path.join(root,'custom/server/preload.cjs'));
+  assert(preloadSrc.includes('installPublicProxy()'),'preload installs the pool explicitly after the environment is set');
+  const proxySrc=read(path.join(root,'custom/server/opencode-public-proxy.cjs'));
+  assert(proxySrc.includes('function installPublicProxy()'),'the pool exposes an explicit installer');
+  assert(require('../server/opencode-public-proxy.cjs').installPublicProxy()===null,'the installer is inert without the env flag');
+  assert(read(path.join(root,'custom/scripts/verify-build.cjs')).includes("require('../server/opencode-public-proxy.cjs')"),'verify-build still imports the module first (the hazard this guards against)');
+
   // The Node transport is guaranteed to be answered with 429 by the free tier, so a
   // missing relay must pause the call (503) instead of burning one account lock per line.
   assert(proxy.includes('relayGuard(pool.fetch'),'the installed fetch is relay-guarded');

@@ -11,7 +11,9 @@ require('./thinking-compat.cjs');
 // the port is up (asynchronous, fail-open when Bun is absent).
 require('./opencode-bun-relay.cjs').startBunRelay();
 require('./opencode-anonymous.cjs');
-require('./opencode-public-proxy.cjs');
+// Explicit: verify-build.cjs imports the proxy module before this file runs, so the
+// module's own load-time hook already saw an unset environment.
+require('./opencode-public-proxy.cjs').installPublicProxy();
 // Outermost marker: if a later fetch patch replaces the chain, this line simply
 // stops appearing while [OpenCodeAnonymous] keeps logging — that is the signal
 // that something bypassed the pool. Never alters the request.
