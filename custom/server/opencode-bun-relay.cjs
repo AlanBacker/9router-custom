@@ -95,6 +95,7 @@ function startBunRelay(options = {}) {
     lastReadyAt: 0,
     startedAt: Date.now(),
     stopping: false,
+    dnsFlag: true,
   };
   globalThis[SYMBOL] = record;
 
@@ -138,8 +139,9 @@ function startBunRelay(options = {}) {
   function launch() {
     if (record.stopping) return;
     let child;
+    const args = [...(record.dnsFlag ? [`--dns-result-order=${dnsOrder()}`] : []), script];
     try {
-      child = spawn(bin, [`--dns-result-order=${dnsOrder()}`, script], {
+      child = spawn(bin, args, {
         env: { ...process.env, OPENCODE_RELAY_PORT: String(port), OPENCODE_RELAY_TOKEN: record.token },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
@@ -169,6 +171,15 @@ function startBunRelay(options = {}) {
       if (record.stopping) return;
       record.error = `relay exited code=${code} signal=${signal || ""} ${captured.slice(-400)}`.trim();
       logger.warn?.(`[OpenCodeRelay] ${record.error}`);
+      // An old Bun rejects the spawn flag outright. The relay script sets the same
+      // DNS order itself, so retry once without the flag instead of looping forever.
+      if (record.dnsFlag && /dns-result-order|unknown (flag|option)|unexpected argument|invalid option/i.test(captured)) {
+        record.dnsFlag = false;
+        logger.warn?.("[OpenCodeRelay] bun rejected --dns-result-order; retrying with the in-script IPv4 order");
+        const timer = setTimeout(launch, 250);
+        timer.unref?.();
+        return;
+      }
       scheduleRestart();
     });
 
@@ -177,7 +188,7 @@ function startBunRelay(options = {}) {
       const ready = await waitUntilReady(port, record.token, Date.now() + READY_TIMEOUT_MS, alive);
       if (!ready) {
         if (alive()) {
-          record.error = record.error || `relay did not answer ${PING_PATH} within ${READY_TIMEOUT_MS}ms`;
+          record.error = record.error || `relay did not answer ${PING_PATH} within ${READY_TIMEOUT_MS}ms${captured ? " | " + captured.slice(-300).trim() : ""}`;
           logger.warn?.(`[OpenCodeRelay] ${record.error} (bun=${bin})`);
           try {
             child.kill();

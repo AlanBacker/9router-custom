@@ -24,6 +24,53 @@ function relayHeaders(headers,egress){
   try{const s=globalThis[RELAY];if(s?.token)out.set('x-9r-relay-token',s.token);}catch{}
   return out;
 }
+function relayError(){
+  try{return globalThis[RELAY]?.error||null;}catch{return null;}
+}
+/** True for the free-tier inference calls that are only accepted over the Bun TLS fingerprint. */
+function isFreeInference(input,init){
+  try{
+    const u=new URL(typeof input==='string'?input:input instanceof URL?input.href:input.url);
+    return u.hostname==='opencode.ai'&&u.pathname.startsWith('/inference/')&&String(init?.method).toUpperCase()==='POST'&&new Headers(init?.headers).get('authorization')==='Bearer public';
+  }catch{return false;}
+}
+function waitForRelay(ms){
+  if(relayBase())return Promise.resolve(true);
+  return new Promise(resolve=>{
+    const deadline=Date.now()+Math.max(0,ms);
+    const tick=()=>{
+      if(relayBase()){resolve(true);return;}
+      if(Date.now()>=deadline){resolve(false);return;}
+      setTimeout(tick,50);
+    };
+    tick();
+  });
+}
+/**
+ * Never let a free-tier call fall back to the Node transport: upstream only accepts
+ * the Bun TLS fingerprint, so the fallback is guaranteed to be answered with 429 and
+ * it burns one account lock per attempt. Wait briefly for the relay (it starts
+ * asynchronously), then fail with an explicit 503 that does not lock any account.
+ */
+function relayGuard(fetchImpl,options={}){
+  const waitMs=Number.isFinite(Number(options.waitMs))?Number(options.waitMs):3000;
+  const logger=options.logger||console;
+  const disabled=options.disabled||(()=>process.env.OPENCODE_RELAY_DISABLE==='1');
+  let warned=false;
+  return async function guardedFetch(input,init){
+    if(disabled()||!isFreeInference(input,init))return fetchImpl(input,init);
+    if(!relayBase()&&waitMs>0)await waitForRelay(waitMs);
+    if(!relayBase()){
+      if(!warned){
+        warned=true;
+        logger.warn?.('[OpenCodeRelay] Bun relay is not ready: free-tier inference is paused instead of falling back to the Node TLS fingerprint (upstream always answers that with 429)'+(relayError()?' lastError='+relayError():''));
+      }
+      return Response.json({error:{type:'OpenCodeRelayUnavailable',message:'本地 Bun 中继未就绪，免费模型请求已暂停（不会回落到必然 429 的 Node 通道）。请检查容器启动日志中的 [OpenCodeRelay]。'}},{status:503,headers:{'retry-after':'3'}});
+    }
+    warned=false;
+    return fetchImpl(input,init);
+  };
+}
 
 
 function publicIPv4(ip){
@@ -102,7 +149,7 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
     const perUrl=new Map();for(const u of assignments.values())perUrl.set(u,(perUrl.get(u)||0)+1);
     const paidSlots=[...entries.values()].filter(e=>e.paid!=null).map(e=>({slot:e.paid,egress:e.egress||null,ok:!e.failed&&e.until<=t&&e.checkedAt>t-config.healthMaxAgeSeconds*1000,lines:perUrl.get(e.url)||0,concurrency:Number(e.paidConcurrency)||0,linesLimit:Number(e.paidLines)||0,rotations:paidSlotRotations.get(e.paid)||0}));
     const paidHealthy=paidSlots.filter(e=>e.ok);
-    return {enabled,autoRecover429:recoveryEnabled,transport:relayBase()?'bun':'node',proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,configuredLines,egressTarget:targetEgresses,healthy:usable().length,paidEgresses:paidHealthy.length,paidSlots,paidCapacity:paidHealthy.reduce((n,e)=>n+Math.max(1,e.linesLimit||1),0),paidAssigned:paidSlots.reduce((n,e)=>n+e.lines,0),assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
+    return {enabled,autoRecover429:recoveryEnabled,transport:relayBase()?'bun':'node',relayError:relayError(),proxySwitches,sessionRepairs,recoverySuccesses,phase:!enabled?'disabled':round?'checking':usable().length?'ready':'waiting',desired,configuredLines,egressTarget:targetEgresses,healthy:usable().length,paidEgresses:paidHealthy.length,paidSlots,paidCapacity:paidHealthy.reduce((n,e)=>n+Math.max(1,e.linesLimit||1),0),paidAssigned:paidSlots.reduce((n,e)=>n+e.lines,0),assigned:assignments.size,tested,candidates:candidates.length,lastRefresh:lastRound||null,lastSourceAttempt:lastSourceAttempt||null,maintenance:{automatic:enabled,replenishSeconds:config.replenishIntervalSeconds,sourceRefreshSeconds:config.sourceRefreshSeconds,healthMaxAgeSeconds:config.healthMaxAgeSeconds,nextCheckAt:enabled?(lastRound+config.replenishIntervalSeconds*1000):null,nextSourceRefreshAt:enabled?(candidates.length?lastSourceAttempt+config.sourceRefreshSeconds*1000:lastRound+config.replenishIntervalSeconds*1000):null,...maintenanceHealth()},lastError:sourceError,sources:sourceStates,lines,updatedAt:t};
   }
   // ---- paid egresses ---------------------------------------------------------------------
   // Dedicated (usually residential) exits. Two forms:
@@ -627,12 +674,12 @@ function getProxyAgent(){
   }
   return require('node:module').createRequire(path.join(process.env.NINEROUTER_APP_ROOT||process.cwd(),'package.json'))('undici').ProxyAgent;
 }
-module.exports={publicIPv4,normalizeProxy,normalizePaidProxy,parseCandidates,mergeCandidates,createPool,createTransportPool,limitedText,getProxyAgent,readSessionCache};
+module.exports={publicIPv4,normalizeProxy,normalizePaidProxy,parseCandidates,mergeCandidates,createPool,createTransportPool,limitedText,getProxyAgent,readSessionCache,relayGuard,waitForRelay,isFreeInference,relayError};
 if(process.env.NINEROUTER_OPENCODE_PUBLIC_PROXY==='1'&&!globalThis[MARK]){
   const config=JSON.parse(fs.readFileSync(path.join(__dirname,'opencode-public-proxy.json'),'utf8'));
   if(process.env.DATA_DIR)for(const key of ['dbFile','stateFile'])config[key]=config[key].replace(/^\/app\/data(?=\/|$)/,process.env.DATA_DIR);
   const pool=createPool({nativeFetch:globalThis.fetch.bind(globalThis),config,storage:runtimeStorage(config),makeAgent:uri=>new (getProxyAgent())({uri,requestTls:{rejectUnauthorized:true},proxyTls:{rejectUnauthorized:true},connect:{timeout:config.probeTimeoutMs}})});
-  globalThis[MARK]=pool;globalThis.fetch=pool.fetch;
+  globalThis[MARK]=pool;globalThis.fetch=relayGuard(pool.fetch,{waitMs:Number(process.env.OPENCODE_RELAY_WAIT_MS||config.relayWaitMs)||3000});
   const timer=setInterval(()=>pool.tick(),3000);timer.unref();pool.tick();
   console.info('[OpenCodePublicProxy] Installed: disabled unless enabled in the dashboard; strict HTTPS and distinct tested egresses.');
 }

@@ -52,5 +52,44 @@ assert(prompt.length>1500,'captured title prompt is complete');
   assert.equal(probe.init.headers['user-agent'],'opencode/latest/2.0.26/cli');
   assert.equal(probe.init.headers['x-opencode-client'],'cli');
   for(const name of ['x-opencode-session','x-opencode-session-id','x-session-id','x-session-affinity'])assert.equal(probe.init.headers[name],'ses_0123456789abABCDEFGHIJKLMN',`probe carries ${name} (upstream 429s without a session header)`);
+
+  // The Node transport is guaranteed to be answered with 429 by the free tier, so a
+  // missing relay must pause the call (503) instead of burning one account lock per line.
+  assert(proxy.includes('relayGuard(pool.fetch'),'the installed fetch is relay-guarded');
+  const {relayGuard}=require('../server/opencode-public-proxy.cjs');
+  const RELAY=Symbol.for('9router.opencodeRelay.v1');
+  const free={url:'https://opencode.ai/inference/v1/chat/completions',init:{method:'POST',headers:{authorization:'Bearer public'},body:'{}'}};
+  const quiet={warn(){},info(){}};
+  let calls=0;const inner=async()=>{calls++;return new Response('ok',{status:200})};
+  assert.equal(typeof relayGuard,'function',"relay guard is exported for the pool's installed fetch");
+
+  delete globalThis[RELAY];
+  let guarded=relayGuard(inner,{waitMs:0,logger:quiet,disabled:()=>false});
+  let response=await guarded(free.url,free.init);
+  assert.equal(response.status,503,'free-tier calls fail loudly when the relay is missing');
+  assert.equal((await response.json()).error.type,'OpenCodeRelayUnavailable','the status names the missing relay');
+  assert.equal(calls,0,'a missing relay never falls back to the Node TLS fingerprint');
+
+  globalThis[RELAY]={ready:true,url:'http://127.0.0.1:20129',token:'t',error:null};
+  guarded=relayGuard(inner,{waitMs:0,logger:quiet,disabled:()=>false});
+  response=await guarded(free.url,free.init);
+  assert.equal(response.status,200,'relay-ready calls pass through');
+  assert.equal(calls,1,'the underlying fetch runs once');
+
+  delete globalThis[RELAY];
+  const passThrough=relayGuard(inner,{waitMs:0,logger:quiet,disabled:()=>true});
+  assert.equal((await passThrough(free.url,free.init)).status,200,'an operator can still disable the relay explicitly');
+  assert.equal(calls,2,'the explicitly disabled relay is not guarded');
+
+  const other=relayGuard(inner,{waitMs:0,logger:quiet,disabled:()=>false});
+  assert.equal((await other('https://api.example.com/v1/chat',free.init)).status,200,'unrelated hosts are untouched');
+  assert.equal(calls,3,'unrelated hosts never wait for the relay');
+
+  globalThis[RELAY]={ready:false,url:'',token:'t',error:null};
+  setTimeout(()=>{globalThis[RELAY]={ready:true,url:'http://127.0.0.1:20129',token:'t',error:null};},150);
+  const late=relayGuard(inner,{waitMs:2000,logger:quiet,disabled:()=>false});
+  assert.equal((await late(free.url,free.init)).status,200,'a relay that starts a moment later is awaited');
+  delete globalThis[RELAY];
+
   console.log('PASS: Bun relay wiring, per-request egress, untouched caller tools, official probe template.');
 })().catch(e=>{console.error(e);process.exitCode=1});
