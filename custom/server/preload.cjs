@@ -12,3 +12,22 @@ require('./thinking-compat.cjs');
 require('./opencode-bun-relay.cjs').startBunRelay();
 require('./opencode-anonymous.cjs');
 require('./opencode-public-proxy.cjs');
+// Outermost marker: if a later fetch patch replaces the chain, this line simply
+// stops appearing while [OpenCodeAnonymous] keeps logging — that is the signal
+// that something bypassed the pool. Never alters the request.
+const layer=globalThis.fetch;
+const traced=async function opencodeTraceFetch(input,init){
+  try{
+    const url=new URL(typeof input==='string'?input:input instanceof URL?input.href:input.url);
+    if(url.hostname==='opencode.ai'&&url.pathname.startsWith('/inference/')&&String(init?.method).toUpperCase()==='POST'){
+      const relay=globalThis[Symbol.for('9router.opencodeRelay.v1')];
+      console.info(`[OpenCodeFetch] ${url.pathname} next=${layer.__9rLayer||layer.name||'anonymous'} relay=${relay?.ready?relay.url:'down'}`);
+    }
+  }catch{}
+  return layer(input,init);
+};
+traced.__9rLayer='preload-trace';
+globalThis.fetch=traced;
+setTimeout(()=>{
+  if(globalThis.fetch!==traced)console.warn(`[OpenCodeFetch] global fetch was replaced after startup by ${globalThis.fetch?.__9rLayer||globalThis.fetch?.name||'unknown'}: free-tier calls may bypass the pool`);
+},4000).unref?.();

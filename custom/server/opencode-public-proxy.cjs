@@ -456,8 +456,9 @@ function createTransportPool({nativeFetch,makeAgent,storage,config,logger=consol
   async function fetchWithPool(input,init){
     let url,headers;
     try{url=new URL(typeof input==='string'?input:input instanceof URL?input.href:input.url);headers=new Headers(init?.headers);}catch{return nativeFetch(input,init);}
-    if(url.hostname!=='opencode.ai'||!url.pathname.startsWith('/inference/')||String(init?.method).toUpperCase()!=='POST'||headers.get('authorization')!=='Bearer public')return nativeFetch(input,init);
-    const s=settings();if(!enabled)return relayBase()?nativeFetch(relayTarget(input),{...init,headers:relayHeaders(headers)}):nativeFetch(input,init);
+    if(url.hostname!=='opencode.ai'||!url.pathname.startsWith('/inference/')||String(init?.method).toUpperCase()!=='POST')return nativeFetch(input,init);
+    if(headers.get('authorization')!=='Bearer public'){logger.info?.('[OpenCodePublicProxy] free-tier path without Bearer public: passing through');return nativeFetch(input,init);}
+    const s=settings();if(!enabled){const relay=relayBase();logger.info?.(`[OpenCodePublicProxy] free-tier request: pool disabled, relay=${relay?'bun':'down'}`);return relay?nativeFetch(relayTarget(input),{...init,headers:relayHeaders(headers)}):nativeFetch(input,init);}
     if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
     hydrate();void refresh();
     let session=headers.get('x-opencode-session');if(!session)return failure('缺少固定上游会话，自动公共代理未发送请求');
@@ -679,7 +680,9 @@ if(process.env.NINEROUTER_OPENCODE_PUBLIC_PROXY==='1'&&!globalThis[MARK]){
   const config=JSON.parse(fs.readFileSync(path.join(__dirname,'opencode-public-proxy.json'),'utf8'));
   if(process.env.DATA_DIR)for(const key of ['dbFile','stateFile'])config[key]=config[key].replace(/^\/app\/data(?=\/|$)/,process.env.DATA_DIR);
   const pool=createPool({nativeFetch:globalThis.fetch.bind(globalThis),config,storage:runtimeStorage(config),makeAgent:uri=>new (getProxyAgent())({uri,requestTls:{rejectUnauthorized:true},proxyTls:{rejectUnauthorized:true},connect:{timeout:config.probeTimeoutMs}})});
-  globalThis[MARK]=pool;globalThis.fetch=relayGuard(pool.fetch,{waitMs:Number(process.env.OPENCODE_RELAY_WAIT_MS||config.relayWaitMs)||3000});
+  const guarded=relayGuard(pool.fetch,{waitMs:Number(process.env.OPENCODE_RELAY_WAIT_MS||config.relayWaitMs)||3000});
+  guarded.__9rLayer='relay-guard';
+  globalThis[MARK]=pool;globalThis.fetch=guarded;
   const timer=setInterval(()=>pool.tick(),3000);timer.unref();pool.tick();
   console.info('[OpenCodePublicProxy] Installed: disabled unless enabled in the dashboard; strict HTTPS and distinct tested egresses.');
 }
