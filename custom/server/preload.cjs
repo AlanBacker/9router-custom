@@ -30,6 +30,3 @@ const traced=async function opencodeTraceFetch(input,init){
 };
 traced.__9rLayer='preload-trace';
 globalThis.fetch=traced;
-setTimeout(()=>{
-  if(globalThis.fetch!==traced)console.warn(`[OpenCodeFetch] global fetch was replaced after startup by ${globalThis.fetch?.__9rLayer||globalThis.fetch?.name||'unknown'}: free-tier calls may bypass the pool`);
-},4000).unref?.();
